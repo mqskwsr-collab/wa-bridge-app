@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.5-fix5-intermediate-click"
+        versionCode = 6
+        versionName = "0.6-fix6-diagnostics"
     }
 
     buildTypes {

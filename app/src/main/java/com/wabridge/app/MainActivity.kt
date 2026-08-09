@@ -1,5 +1,7 @@
 package com.wabridge.app
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
@@ -36,6 +38,13 @@ class MainActivity : AppCompatActivity() {
         tvLastEvent = findViewById(R.id.tvLastEvent)
         btnTogglePolling = findViewById(R.id.btnTogglePolling)
         findViewById<TextView>(R.id.tvBuildTag).text = "גרסה מותקנת: ${BuildInfo.BUILD_TAG}"
+
+        findViewById<Button>(R.id.btnCopyLog).setOnClickListener {
+            val logText = EventLog.getAll()
+            val clipboard = getSystemService(ClipboardManager::class.java)
+            clipboard.setPrimaryClip(ClipData.newPlainText("WA Bridge log", logText))
+            Toast.makeText(this, "היומן הועתק - אפשר להדביק בהודעה", Toast.LENGTH_SHORT).show()
+        }
         etWebAppUrl = findViewById(R.id.etWebAppUrl)
         val btnGrantAccess = findViewById<Button>(R.id.btnGrantAccess)
         val btnSaveUrl = findViewById<Button>(R.id.btnSaveUrl)

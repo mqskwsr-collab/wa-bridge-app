@@ -12,7 +12,7 @@ import java.util.Locale
  */
 object EventLog {
     private val entries = ArrayDeque<String>()
-    private const val MAX_ENTRIES = 25
+    private const val MAX_ENTRIES = 80
     private val fmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
     @Synchronized

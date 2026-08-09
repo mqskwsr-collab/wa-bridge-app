@@ -40,6 +40,7 @@ class WaSendAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var searching = false
     private var searchStartTime = 0L
+    private var lastDiagnosticDumpTime = 0L
     // Group invite links open an intermediate WhatsApp landing screen
     // (a preview with a "הודעה"/"Message" button) before the actual
     // conversation screen appears - MacroDroid's old macro #2 had a
@@ -58,6 +59,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         searching = true
         searchStartTime = System.currentTimeMillis()
         clickedIntermediateScreen = false
+        lastDiagnosticDumpTime = 0L
         handler.post(searchRunnable)
     }
 
@@ -72,7 +74,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             val elapsed = System.currentTimeMillis() - searchStartTime
             if (elapsed > SEARCH_TIMEOUT_MS) {
                 Log.w(TAG, "Timed out searching for entry/send fields")
-                EventLog.log("A11y: ❌ Timeout - לא נמצא שדה הודעה/שליחה תוך 10 שניות")
+                EventLog.log("A11y: ❌ Timeout - לא נמצא שדה הודעה/שליחה תוך ${SEARCH_TIMEOUT_MS / 1000} שניות")
                 searching = false
                 SendCoordinator.reportResult(SendCoordinator.Result.TIMEOUT)
                 return
@@ -80,8 +82,18 @@ class WaSendAccessibilityService : AccessibilityService() {
 
             val root = rootInActiveWindow
             if (root == null) {
+                EventLog.log("A11y: ⚠️ rootInActiveWindow=null (אין חלון פעיל זמין כרגע)")
                 handler.postDelayed(this, SEARCH_INTERVAL_MS)
                 return
+            }
+
+            if (elapsed - lastDiagnosticDumpTime > 2000L) {
+                lastDiagnosticDumpTime = elapsed
+                val pkg = root.packageName ?: "?"
+                val cls = root.className ?: "?"
+                val texts = mutableListOf<String>()
+                collectTexts(root, texts, maxCount = 12)
+                EventLog.log("A11y: 🔍 [+${elapsed / 1000}s] חלון=$pkg/$cls | טקסטים: ${texts.joinToString(" | ").ifBlank { "(אין טקסטים כלל)" }}")
             }
 
             val entryNode = findEditText(root)
@@ -168,6 +180,26 @@ class WaSendAccessibilityService : AccessibilityService() {
             if (found != null) return found
         }
         return null
+    }
+
+    /**
+     * Diagnostic helper: collects up to maxCount non-blank text/
+     * content-description strings visible anywhere in the tree, so we
+     * can see on-screen (via EventLog) what WhatsApp is actually
+     * showing at the moment the search runs - without needing
+     * Logcat/Android Studio.
+     */
+    private fun collectTexts(node: AccessibilityNodeInfo, out: MutableList<String>, maxCount: Int) {
+        if (out.size >= maxCount) return
+        val t = node.text?.toString()?.trim()
+        val d = node.contentDescription?.toString()?.trim()
+        if (!t.isNullOrBlank() && t !in out) out.add(t)
+        else if (!d.isNullOrBlank() && d !in out) out.add(d)
+        for (i in 0 until node.childCount) {
+            if (out.size >= maxCount) return
+            val child = node.getChild(i) ?: continue
+            collectTexts(child, out, maxCount)
+        }
     }
 
     /** Finds the first EditText-class node in the tree - WhatsApp's message box. */
