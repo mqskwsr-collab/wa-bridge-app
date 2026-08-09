@@ -33,13 +33,19 @@ class WaSendAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "WaBridgeA11y"
-        private const val SEARCH_TIMEOUT_MS = 10000L
+        private const val SEARCH_TIMEOUT_MS = 15000L
         private const val SEARCH_INTERVAL_MS = 400L
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private var searching = false
     private var searchStartTime = 0L
+    // Group invite links open an intermediate WhatsApp landing screen
+    // (a preview with a "הודעה"/"Message" button) before the actual
+    // conversation screen appears - MacroDroid's old macro #2 had a
+    // dedicated click for exactly this. We only want to click it once
+    // per job.
+    private var clickedIntermediateScreen = false
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -51,6 +57,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         EventLog.log("A11y: חלון וואטסאפ השתנה, מתחיל לחפש שדה הודעה+שליחה")
         searching = true
         searchStartTime = System.currentTimeMillis()
+        clickedIntermediateScreen = false
         handler.post(searchRunnable)
     }
 
@@ -81,9 +88,21 @@ class WaSendAccessibilityService : AccessibilityService() {
             val sendNode = findSendButton(root)
 
             if (entryNode == null) {
+                // No message box yet - this could be a group invite's
+                // intermediate landing screen (a preview with a
+                // "הודעה"/"Message" button, not the conversation itself).
+                // Try clicking that once, then keep searching for entry.
+                if (!clickedIntermediateScreen) {
+                    val intermediateBtn = findClickableByText(root, listOf("הודעה", "Message", "message"))
+                    if (intermediateBtn != null) {
+                        Log.i(TAG, "Found intermediate landing screen button - clicking it")
+                        EventLog.log("A11y: נמצא מסך ביניים, לוחץ על כפתור \"הודעה\"")
+                        clickedIntermediateScreen = true
+                        intermediateBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    }
+                }
                 // Screen probably still loading (or this is not the chat
-                // screen, e.g. a "join group" preview) - keep retrying
-                // until timeout.
+                // screen yet) - keep retrying until timeout.
                 handler.postDelayed(this, SEARCH_INTERVAL_MS)
                 return
             }
@@ -126,6 +145,29 @@ class WaSendAccessibilityService : AccessibilityService() {
                 }
             }, 500)
         }
+    }
+
+    /**
+     * Finds a clickable node whose visible text or content-description
+     * matches one of the given candidates (case-insensitive, exact or
+     * "starts with" match) - used to find the group-invite intermediate
+     * landing screen's CTA button.
+     */
+    private fun findClickableByText(node: AccessibilityNodeInfo, candidates: List<String>): AccessibilityNodeInfo? {
+        val text = node.text?.toString() ?: node.contentDescription?.toString()
+        if (node.isClickable && text != null) {
+            for (candidate in candidates) {
+                if (text.equals(candidate, ignoreCase = true) || text.startsWith(candidate, ignoreCase = true)) {
+                    return node
+                }
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findClickableByText(child, candidates)
+            if (found != null) return found
+        }
+        return null
     }
 
     /** Finds the first EditText-class node in the tree - WhatsApp's message box. */
