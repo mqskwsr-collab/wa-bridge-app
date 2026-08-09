@@ -204,7 +204,13 @@ class WaSendAccessibilityService : AccessibilityService() {
 
     /** Finds the first EditText-class node in the tree - WhatsApp's message box. */
     private fun findEditText(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        if (node.className == "android.widget.EditText") return node
+        // Broadened from an exact "android.widget.EditText" match: WhatsApp
+        // may wrap the message box in a custom subclass that reports a
+        // different (but EditText-containing) class name via
+        // accessibility - diagnostic dumps confirmed the correct chat
+        // screen was reached but no exact-match EditText was found.
+        val cls = node.className?.toString()
+        if (cls != null && cls.contains("EditText", ignoreCase = true)) return node
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = findEditText(child)

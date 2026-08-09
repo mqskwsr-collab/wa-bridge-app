@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX6-diagnostics-2026-08-09"
+    const val BUILD_TAG = "FIX7-edittext-clear-task-2026-08-09"
 }

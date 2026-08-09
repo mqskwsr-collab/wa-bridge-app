@@ -122,7 +122,12 @@ class PollingService : Service() {
 
         try {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse(chatUrl)).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // CLEAR_TASK forces WhatsApp's existing task to be torn
+                // down and rebuilt fresh from this intent, instead of
+                // just resuming whatever screen was already open (which
+                // was observed to sometimes silently ignore the deep
+                // link and land on an unrelated chat).
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                 setPackage("com.whatsapp")
             }
             startActivity(intent)
