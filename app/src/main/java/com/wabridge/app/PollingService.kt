@@ -50,7 +50,7 @@ class PollingService : Service() {
         if (running.compareAndSet(false, true)) {
             startForeground(NOTIFICATION_ID, buildNotification("פעיל - בודק תור כל 20 שניות"))
             isRunning = true
-            EventLog.log("Poll: השירות הופעל")
+            EventLog.log("[${BuildInfo.BUILD_TAG}] Poll: השירות הופעל")
             workerThread = Thread { pollLoop() }.apply { start() }
         }
         return START_STICKY

@@ -35,6 +35,7 @@ class MainActivity : AppCompatActivity() {
         tvAccessibilityStatus = findViewById(R.id.tvAccessibilityStatus)
         tvLastEvent = findViewById(R.id.tvLastEvent)
         btnTogglePolling = findViewById(R.id.btnTogglePolling)
+        findViewById<TextView>(R.id.tvBuildTag).text = "גרסה מותקנת: ${BuildInfo.BUILD_TAG}"
         etWebAppUrl = findViewById(R.id.etWebAppUrl)
         val btnGrantAccess = findViewById<Button>(R.id.btnGrantAccess)
         val btnSaveUrl = findViewById<Button>(R.id.btnSaveUrl)

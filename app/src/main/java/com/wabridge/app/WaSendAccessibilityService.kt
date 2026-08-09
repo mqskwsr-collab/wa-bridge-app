@@ -213,6 +213,6 @@ class WaSendAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         Log.i(TAG, "Accessibility service connected")
-        EventLog.log("A11y: השירות התחבר בהצלחה")
+        EventLog.log("[${BuildInfo.BUILD_TAG}] A11y: השירות התחבר בהצלחה")
     }
 }
