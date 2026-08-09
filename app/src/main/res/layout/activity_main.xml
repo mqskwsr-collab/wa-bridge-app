@@ -49,6 +49,42 @@
         android:layout_height="wrap_content"
         android:text="שמור כתובת" />
 
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#DDDDDD"
+        android:layout_marginTop="24dp"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="שלב 2 - שליחת תשובות לוואטסאפ"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="12dp" />
+
+    <TextView
+        android:id="@+id/tvAccessibilityStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="בודק..."
+        android:textSize="16sp"
+        android:layout_marginBottom="8dp" />
+
+    <Button
+        android:id="@+id/btnGrantAccessibility"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="פתח הגדרות נגישות (Accessibility)"
+        android:layout_marginBottom="16dp" />
+
+    <Button
+        android:id="@+id/btnTogglePolling"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="התחל שירות שליחה" />
+
     <TextView
         android:id="@+id/tvLastEvent"
         android:layout_width="match_parent"

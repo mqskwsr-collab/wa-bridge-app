@@ -3,8 +3,9 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Needed so the notification-reading service survives Android's background kills -->
+    <!-- Needed so the notification-reading / polling services survive Android's background kills -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
@@ -37,6 +38,34 @@
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+        </service>
+
+        <!--
+          Phase 2: polls ?action=check and drives WhatsApp sending.
+          dataSync is the closest official foreground-service type for a
+          periodic network-polling background task on Android 14+.
+        -->
+        <service
+            android:name=".PollingService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+          Phase 2: finds the message box / send button inside WhatsApp's
+          UI and performs the actual send. Requires the user to manually
+          enable it in Settings > Accessibility (same category of manual
+          grant as MacroDroid's own Accessibility permission).
+        -->
+        <service
+            android:name=".WaSendAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
         </service>
 
     </application>

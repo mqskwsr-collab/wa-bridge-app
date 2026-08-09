@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">WA Bridge</string>
+    <string name="accessibility_service_description">מאפשר ל-WA Bridge למצוא את שדה ההודעה וכפתור השליחה בתוך וואטסאפ, כדי לשלוח תשובות שהתקבלו במייל בחזרה לצ\'אט/קבוצה הנכונים. פועל אך ורק כשוואטסאפ פתוח.</string>
 </resources>

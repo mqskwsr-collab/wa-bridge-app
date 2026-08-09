@@ -1,6 +1,7 @@
 package com.wabridge.app
 
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
@@ -12,6 +13,8 @@ import androidx.appcompat.app.AppCompatActivity
 class MainActivity : AppCompatActivity() {
 
     private lateinit var tvStatus: TextView
+    private lateinit var tvAccessibilityStatus: TextView
+    private lateinit var btnTogglePolling: Button
     private lateinit var etWebAppUrl: EditText
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -19,9 +22,12 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         tvStatus = findViewById(R.id.tvStatus)
+        tvAccessibilityStatus = findViewById(R.id.tvAccessibilityStatus)
+        btnTogglePolling = findViewById(R.id.btnTogglePolling)
         etWebAppUrl = findViewById(R.id.etWebAppUrl)
         val btnGrantAccess = findViewById<Button>(R.id.btnGrantAccess)
         val btnSaveUrl = findViewById<Button>(R.id.btnSaveUrl)
+        val btnGrantAccessibility = findViewById<Button>(R.id.btnGrantAccessibility)
 
         Prefs.getWebAppUrl(this)?.let { etWebAppUrl.setText(it) }
 
@@ -32,6 +38,10 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
         }
 
+        btnGrantAccessibility.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+
         btnSaveUrl.setOnClickListener {
             val url = etWebAppUrl.text.toString().trim()
             if (url.isEmpty() || !url.startsWith("https://")) {
@@ -40,6 +50,25 @@ class MainActivity : AppCompatActivity() {
             }
             Prefs.setWebAppUrl(this, url)
             Toast.makeText(this, "נשמר", Toast.LENGTH_SHORT).show()
+        }
+
+        btnTogglePolling.setOnClickListener {
+            val intent = Intent(this, PollingService::class.java)
+            if (PollingService.isRunning) {
+                stopService(intent)
+            } else {
+                if (Prefs.getWebAppUrl(this).isNullOrBlank()) {
+                    Toast.makeText(this, "קודם שמור את כתובת ה-Web App למעלה", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    startService(intent)
+                }
+            }
+            // Small delay so isRunning reflects the just-issued command.
+            btnTogglePolling.postDelayed({ updateStatus() }, 300)
         }
     }
 
@@ -57,6 +86,22 @@ class MainActivity : AppCompatActivity() {
             "✅ גישה להתראות מאושרת - השירות פעיל"
         } else {
             "❌ גישה להתראות לא מאושרת - לחץ למטה כדי לאשר"
+        }
+
+        val enabledAccessibility = Settings.Secure.getString(
+            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: ""
+        val accessibilityGranted = enabledAccessibility.contains(packageName)
+        tvAccessibilityStatus.text = if (accessibilityGranted) {
+            "✅ שירות הנגישות פעיל"
+        } else {
+            "❌ שירות הנגישות לא מאושר - לחץ למטה כדי לאשר (חפש \"WA Bridge\" ברשימה)"
+        }
+
+        btnTogglePolling.text = if (PollingService.isRunning) {
+            "⏹ עצור שירות שליחה (פעיל כרגע)"
+        } else {
+            "▶ התחל שירות שליחה"
         }
     }
 }
