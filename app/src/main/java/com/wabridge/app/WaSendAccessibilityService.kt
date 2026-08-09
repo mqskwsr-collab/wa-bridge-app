@@ -48,6 +48,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         if (searching) return // already trying for the current job
 
         Log.i(TAG, "WhatsApp window state changed and a job is pending - starting search")
+        EventLog.log("A11y: חלון וואטסאפ השתנה, מתחיל לחפש שדה הודעה+שליחה")
         searching = true
         searchStartTime = System.currentTimeMillis()
         handler.post(searchRunnable)
@@ -64,6 +65,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             val elapsed = System.currentTimeMillis() - searchStartTime
             if (elapsed > SEARCH_TIMEOUT_MS) {
                 Log.w(TAG, "Timed out searching for entry/send fields")
+                EventLog.log("A11y: ❌ Timeout - לא נמצא שדה הודעה/שליחה תוך 10 שניות")
                 searching = false
                 SendCoordinator.reportResult(SendCoordinator.Result.TIMEOUT)
                 return
@@ -92,6 +94,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             }
 
             Log.i(TAG, "Found entry + send nodes - typing and sending")
+            EventLog.log("A11y: נמצאו שני השדות, מקליד טקסט...")
             val args = Bundle()
             args.putCharSequence(
                 AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
@@ -100,6 +103,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             val typed = entryNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
             if (!typed) {
                 Log.w(TAG, "ACTION_SET_TEXT failed on entry node")
+                EventLog.log("A11y: ⚠️ הקלדה נכשלה, מנסה שוב...")
                 handler.postDelayed(this, SEARCH_INTERVAL_MS)
                 return
             }
@@ -113,9 +117,11 @@ class WaSendAccessibilityService : AccessibilityService() {
                 searching = false
                 if (clicked) {
                     Log.i(TAG, "Send button clicked successfully")
+                    EventLog.log("A11y: ✅ נלחץ כפתור שליחה בהצלחה")
                     SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
                 } else {
                     Log.w(TAG, "Send button click failed")
+                    EventLog.log("A11y: ❌ לחיצה על כפתור שליחה נכשלה")
                     SendCoordinator.reportResult(SendCoordinator.Result.FAILED_NO_SEND_BUTTON)
                 }
             }, 500)
@@ -160,5 +166,11 @@ class WaSendAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         Log.w(TAG, "Accessibility service interrupted")
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        Log.i(TAG, "Accessibility service connected")
+        EventLog.log("A11y: השירות התחבר בהצלחה")
     }
 }

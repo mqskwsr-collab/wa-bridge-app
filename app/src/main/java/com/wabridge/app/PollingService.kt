@@ -50,6 +50,7 @@ class PollingService : Service() {
         if (running.compareAndSet(false, true)) {
             startForeground(NOTIFICATION_ID, buildNotification("פעיל - בודק תור כל 20 שניות"))
             isRunning = true
+            EventLog.log("Poll: השירות הופעל")
             workerThread = Thread { pollLoop() }.apply { start() }
         }
         return START_STICKY
@@ -101,6 +102,7 @@ class PollingService : Service() {
         }
 
         Log.i(TAG, "Pending job row=$rowNumber type=$type target=$target")
+        EventLog.log("Poll: נמצא תור ממתין - row=$rowNumber target=$target")
         updateNotification("שולח הודעה ל: $target")
 
         val job = SendCoordinator.PendingSend(rowNumber, type, target, text, phoneOrLink)
@@ -124,27 +126,33 @@ class PollingService : Service() {
                 setPackage("com.whatsapp")
             }
             startActivity(intent)
+            EventLog.log("Poll: פתחתי את וואטסאפ (${if (type=="group") "קבוצה" else "פרטי"})")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch WhatsApp intent", e)
+            EventLog.log("Poll: ❌ נכשל לפתוח וואטסאפ: ${e.message}")
             SendCoordinator.reportResult(SendCoordinator.Result.FAILED_NO_TARGET_SCREEN)
         }
 
         val completed = latch.await(SEND_WAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         if (!completed) {
             Log.w(TAG, "Timed out waiting for accessibility service result for row $rowNumber")
+            EventLog.log("Poll: ❌ Timeout מחכה לתגובת שירות הנגישות")
             updateNotification("פעיל - בודק תור כל 20 שניות")
             return
         }
 
         if (result == SendCoordinator.Result.SUCCESS) {
             Log.i(TAG, "Send confirmed for row $rowNumber - calling markSent")
+            EventLog.log("Poll: ✅ נשלח בהצלחה, מעדכן markSent")
             try {
                 httpGet("$webAppUrl?action=markSent&row=$rowNumber")
             } catch (e: Exception) {
                 Log.e(TAG, "markSent call failed for row $rowNumber", e)
+                EventLog.log("Poll: ⚠️ markSent נכשל: ${e.message}")
             }
         } else {
             Log.w(TAG, "Send did NOT succeed for row $rowNumber (result=$result) - will retry next cycle")
+            EventLog.log("Poll: ❌ השליחה לא הצליחה (result=$result), ינסה שוב בסבב הבא")
         }
         updateNotification("פעיל - בודק תור כל 20 שניות")
     }

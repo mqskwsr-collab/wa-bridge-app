@@ -89,14 +89,31 @@
         android:layout_height="wrap_content"
         android:text="התחל שירות שליחה" />
 
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#DDDDDD"
+        android:layout_marginTop="24dp"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="יומן אירועים (מתעדכן חי):"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp" />
+
     <TextView
         android:id="@+id/tvLastEvent"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
         android:text=""
-        android:textSize="13sp"
-        android:textColor="#666666" />
+        android:textSize="12sp"
+        android:fontFamily="monospace"
+        android:textColor="#333333"
+        android:background="#F0F0F0"
+        android:padding="8dp" />
 
 </LinearLayout>
 </ScrollView>

@@ -3,6 +3,8 @@ package com.wabridge.app
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.widget.Button
 import android.widget.EditText
@@ -14,8 +16,16 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var tvStatus: TextView
     private lateinit var tvAccessibilityStatus: TextView
+    private lateinit var tvLastEvent: TextView
     private lateinit var btnTogglePolling: Button
     private lateinit var etWebAppUrl: EditText
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val logRefreshRunnable = object : Runnable {
+        override fun run() {
+            tvLastEvent.text = EventLog.getAll().ifBlank { "(אין אירועים עדיין)" }
+            uiHandler.postDelayed(this, 1000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -23,6 +33,7 @@ class MainActivity : AppCompatActivity() {
 
         tvStatus = findViewById(R.id.tvStatus)
         tvAccessibilityStatus = findViewById(R.id.tvAccessibilityStatus)
+        tvLastEvent = findViewById(R.id.tvLastEvent)
         btnTogglePolling = findViewById(R.id.btnTogglePolling)
         etWebAppUrl = findViewById(R.id.etWebAppUrl)
         val btnGrantAccess = findViewById<Button>(R.id.btnGrantAccess)
@@ -75,6 +86,12 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         updateStatus()
+        uiHandler.post(logRefreshRunnable)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        uiHandler.removeCallbacks(logRefreshRunnable)
     }
 
     private fun updateStatus() {
