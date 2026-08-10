@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 18
-        versionName = "0.18-fix18-click-verify-clear"
+        versionCode = 19
+        versionName = "0.19-fix19-exclude-entry-from-send-search"
     }
 
     buildTypes {

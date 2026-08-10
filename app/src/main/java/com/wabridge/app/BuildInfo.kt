@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX18-click-verify-clear-2026-08-09"
+    const val BUILD_TAG = "FIX19-exclude-entry-from-send-search-2026-08-09"
 }

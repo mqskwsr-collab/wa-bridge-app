@@ -397,18 +397,30 @@ class WaSendAccessibilityService : AccessibilityService() {
     }
 
     private fun findSendButtonCandidate(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        // Never match the entry/compose box itself as the "send button" -
+        // if the message text being typed happens to contain the word
+        // "שליחה"/"Send" (e.g. a test message like "בדיקה שליחה..."),
+        // the EditText's OWN text would otherwise match our text-based
+        // search below and get clicked instead of the real button. This
+        // was confirmed to be exactly what was happening in testing.
+        val cls = node.className?.toString()
+        val isEntryField = cls != null && cls.contains("Edit", ignoreCase = true)
+
         // Strategy 1: resource id containing "send"
-        node.viewIdResourceName?.let { id ->
-            if (id.contains("send", ignoreCase = true)) return node
-        }
-        // Strategy 2: visible text OR content description matching
-        // "Send" (English) or a Hebrew form - diagnostics confirmed
-        // WhatsApp's actual button text is "שליחה" (a noun, "sending"),
-        // not "שלח" (the imperative verb) which was checked before and
-        // is NOT a substring of "שליחה" - both are matched now.
-        val label = node.text?.toString() ?: node.contentDescription?.toString()
-        label?.let { l ->
-            if (l.equals("Send", ignoreCase = true) || l.contains("שלח") || l.contains("שליחה")) return node
+        if (!isEntryField) {
+            node.viewIdResourceName?.let { id ->
+                if (id.contains("send", ignoreCase = true)) return node
+            }
+            // Strategy 2: visible text OR content description matching
+            // "Send" (English) or a Hebrew form - diagnostics confirmed
+            // WhatsApp's actual button text is "שליחה" (a noun,
+            // "sending"), not "שלח" (the imperative verb) which was
+            // checked before and is NOT a substring of "שליחה" - both
+            // are matched now.
+            val label = node.text?.toString() ?: node.contentDescription?.toString()
+            label?.let { l ->
+                if (l.equals("Send", ignoreCase = true) || l.contains("שלח") || l.contains("שליחה")) return node
+            }
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
