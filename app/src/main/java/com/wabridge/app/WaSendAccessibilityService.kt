@@ -212,7 +212,8 @@ class WaSendAccessibilityService : AccessibilityService() {
 
         val freshRoot = rootInActiveWindow
         val currentEntry = freshRoot?.let { findEditText(it) }
-        val currentEntryText = currentEntry?.text?.toString() ?: ""
+        val currentEntryText = stripBidiMarks(currentEntry?.text?.toString() ?: "").trim()
+        val expectedEntryText = stripBidiMarks(job.text).trim()
         val freshSend = freshRoot?.let { findSendButton(it) }
 
         if (freshSend == null) {
@@ -225,7 +226,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         // text we intended to send. This guards against tapping send on
         // stale/empty/wrong content if state got clobbered by another
         // concurrent attempt.
-        if (currentEntryText != job.text) {
+        if (currentEntryText != expectedEntryText) {
             EventLog.log("A11y: ⚠️ [ניסיון $attempt] תוכן התיבה ('$currentEntryText') לא תואם לצפוי - לא לוחץ, ממתין")
             handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 500)
             return
@@ -244,22 +245,29 @@ class WaSendAccessibilityService : AccessibilityService() {
 
         // ACTION_CLICK returning true only means Android delivered the
         // click event - it does NOT guarantee WhatsApp actually acted on
-        // it (observed once: reported success, message stayed in the
-        // box). So verify for real: WhatsApp clears the compose box the
-        // moment a message is actually sent. Check that after a short
-        // delay instead of trusting the return value alone.
+        // it, so verify for real. IMPORTANT: WhatsApp's compose box does
+        // NOT necessarily go fully blank after a successful send - it
+        // was confirmed (via screenshot showing 4 real successful sends)
+        // that it reverts to showing the placeholder/hint text (e.g.
+        // "הודעה") which is NOT an empty string, so checking
+        // isBlank() alone produced false negatives (real sends being
+        // misreported as failures, causing repeated re-sends). The
+        // correct check is simply: does the box still contain OUR
+        // message? If not - whether it's truly empty or showing a
+        // placeholder - the send succeeded.
         handler.postDelayed({
             val checkRoot = rootInActiveWindow
             val checkEntry = checkRoot?.let { findEditText(it) }
-            val textNow = checkEntry?.text?.toString() ?: ""
-            if (textNow.isBlank()) {
-                Log.i(TAG, "Compose box cleared - send confirmed")
-                EventLog.log("A11y: ✅ תיבת ההודעה התרוקנה - השליחה אומתה בפועל")
+            val textNow = stripBidiMarks(checkEntry?.text?.toString() ?: "").trim()
+            val expectedText = stripBidiMarks(job.text).trim()
+            if (textNow != expectedText) {
+                Log.i(TAG, "Compose box no longer contains our message ('$textNow') - send confirmed")
+                EventLog.log("A11y: ✅ התיבה כבר לא מכילה את ההודעה שלנו (מציגה '$textNow') - השליחה אומתה בפועל")
                 searching = false
                 SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
             } else {
-                Log.w(TAG, "Compose box still has text after click - not actually sent")
-                EventLog.log("A11y: ❌ [ניסיון $attempt] התיבה עדיין מכילה '$textNow' אחרי הלחיצה - לא נשלח באמת, מנסה שוב")
+                Log.w(TAG, "Compose box still has our exact text after click - not actually sent")
+                EventLog.log("A11y: ❌ [ניסיון $attempt] התיבה עדיין מכילה את אותה הודעה בדיוק אחרי הלחיצה - לא נשלח באמת, מנסה שוב")
                 searchForSendButtonAfterTyping(attempt + 1)
             }
         }, 700)
@@ -421,10 +429,16 @@ class WaSendAccessibilityService : AccessibilityService() {
         val cls = node.className?.toString()
         val isEntryField = cls != null && cls.contains("Edit", ignoreCase = true)
 
-        // Strategy 1: resource id containing "send"
+        // Strategy 1: resource id's last path segment equals "send"
+        // exactly (e.g. "com.whatsapp:id/send") - "contains" was too
+        // loose and matched unrelated buttons whose internal id happens
+        // to contain the substring "send" (confirmed: an empty-compose-
+        // box camera/attach-area button got matched this way while the
+        // real Send button didn't exist yet).
         if (!isEntryField) {
             node.viewIdResourceName?.let { id ->
-                if (id.contains("send", ignoreCase = true)) return node
+                val lastSegment = id.substringAfterLast('/')
+                if (lastSegment.equals("send", ignoreCase = true)) return node
             }
             // Strategy 2: visible text OR content description EXACTLY
             // matching a known send-button label (not just "contains"!).

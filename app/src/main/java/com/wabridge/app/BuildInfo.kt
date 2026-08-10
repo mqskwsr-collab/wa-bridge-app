@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX21-strip-bidi-marks-2026-08-09"
+    const val BUILD_TAG = "FIX23-placeholder-aware-verify-2026-08-09"
 }

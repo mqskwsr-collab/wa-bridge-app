@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 21
-        versionName = "0.21-fix21-strip-bidi-marks"
+        versionCode = 23
+        versionName = "0.23-fix23-placeholder-aware-verify"
     }
 
     buildTypes {
