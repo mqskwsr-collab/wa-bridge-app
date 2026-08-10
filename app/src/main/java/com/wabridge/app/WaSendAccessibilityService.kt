@@ -137,6 +137,13 @@ class WaSendAccessibilityService : AccessibilityService() {
                 return
             }
 
+            // Copy to non-null local vals so Kotlin's smart-cast works
+            // correctly inside the nested closure below (a `var` captured
+            // by a lambda can't be smart-cast, since it could
+            // theoretically change between capture and use).
+            val entryNodeFinal: AccessibilityNodeInfo = entryNode!!
+            val sendNodeFinal: AccessibilityNodeInfo = sendNode!!
+
             Log.i(TAG, "Found entry + send nodes - typing and sending")
             EventLog.log("A11y: נמצאו שני השדות, מקליד טקסט...")
             val args = Bundle()
@@ -144,7 +151,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                 AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
                 job.text
             )
-            val typed = entryNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            val typed = entryNodeFinal.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
             if (!typed) {
                 Log.w(TAG, "ACTION_SET_TEXT failed on entry node")
                 EventLog.log("A11y: ⚠️ הקלדה נכשלה, מנסה שוב...")
@@ -156,7 +163,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             // text is entered (some versions disable it for empty input).
             handler.postDelayed({
                 val freshRoot = rootInActiveWindow
-                val freshSend = freshRoot?.let { findSendButton(it) } ?: sendNode
+                val freshSend = freshRoot?.let { findSendButton(it) } ?: sendNodeFinal
                 val clicked = freshSend.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 searching = false
                 if (clicked) {
