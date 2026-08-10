@@ -41,6 +41,7 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var searching = false
     private var searchStartTime = 0L
     private var lastDiagnosticDumpTime = 0L
+    private var lastSendDumpTime = 0L
     // Group invite links open an intermediate WhatsApp landing screen
     // (a preview with a "הודעה"/"Message" button) before the actual
     // conversation screen appears - MacroDroid's old macro #2 had a
@@ -60,6 +61,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         searchStartTime = System.currentTimeMillis()
         clickedIntermediateScreen = false
         lastDiagnosticDumpTime = 0L
+        lastSendDumpTime = 0L
         handler.post(searchRunnable)
     }
 
@@ -133,6 +135,14 @@ class WaSendAccessibilityService : AccessibilityService() {
             }
 
             if (sendNode == null) {
+                if (elapsed - lastSendDumpTime > 1900L) {
+                    lastSendDumpTime = elapsed
+                    // Entry found but send button not yet - dump clickable
+                    // node info to help identify it if this keeps failing.
+                    val clickables = mutableListOf<String>()
+                    collectClickableInfo(root, clickables, maxCount = 15)
+                    EventLog.log("A11y: ✏️ entry נמצא (class=${entryNode?.className}), מחפש כפתור שליחה. כפתורים לחיצים: ${clickables.joinToString(" | ")}")
+                }
                 handler.postDelayed(this, SEARCH_INTERVAL_MS)
                 return
             }
@@ -222,6 +232,22 @@ class WaSendAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** Diagnostic: collects "class/id/text/desc" info for clickable nodes. */
+    private fun collectClickableInfo(node: AccessibilityNodeInfo, out: MutableList<String>, maxCount: Int) {
+        if (out.size >= maxCount) return
+        if (node.isClickable) {
+            val cls = node.className?.toString()?.substringAfterLast('.') ?: "?"
+            val id = node.viewIdResourceName?.substringAfterLast('/') ?: ""
+            val text = node.text?.toString() ?: node.contentDescription?.toString() ?: ""
+            out.add("$cls${if (id.isNotBlank()) "#$id" else ""}${if (text.isNotBlank()) "('$text')" else ""}")
+        }
+        for (i in 0 until node.childCount) {
+            if (out.size >= maxCount) return
+            val child = node.getChild(i) ?: continue
+            collectClickableInfo(child, out, maxCount)
+        }
+    }
+
     /** Diagnostic: counts nodes anywhere in the tree whose class name contains the given substring. */
     private fun countMatchingClass(node: AccessibilityNodeInfo, substr: String): Int {
         var count = if (node.className?.contains(substr, ignoreCase = true) == true) 1 else 0
@@ -234,13 +260,13 @@ class WaSendAccessibilityService : AccessibilityService() {
 
     /** Finds the first EditText-class node in the tree - WhatsApp's message box. */
     private fun findEditText(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        // Broadened from an exact "android.widget.EditText" match: WhatsApp
-        // may wrap the message box in a custom subclass that reports a
-        // different (but EditText-containing) class name via
-        // accessibility - diagnostic dumps confirmed the correct chat
-        // screen was reached but no exact-match EditText was found.
+        // Broadened again: countMatchingClass diagnostics confirmed
+        // exactly one "Edit*"-classed node exists on the correct chat
+        // screen, but it didn't match the stricter "EditText" substring -
+        // so its real class name apparently contains "Edit" without
+        // literally containing "EditText" (e.g. a custom subclass name).
         val cls = node.className?.toString()
-        if (cls != null && cls.contains("EditText", ignoreCase = true)) return node
+        if (cls != null && cls.contains("Edit", ignoreCase = true)) return node
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = findEditText(child)

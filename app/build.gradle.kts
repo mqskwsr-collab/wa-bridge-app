@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 9
-        versionName = "0.9-fix9-compile-fix"
+        versionCode = 10
+        versionName = "0.10-fix10-edit-broadened"
     }
 
     buildTypes {
