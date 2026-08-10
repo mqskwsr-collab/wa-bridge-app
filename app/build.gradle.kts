@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 13
-        versionName = "0.13-fix13-hebrew-send-label"
+        versionCode = 14
+        versionName = "0.14-fix14-retry-click"
     }
 
     buildTypes {

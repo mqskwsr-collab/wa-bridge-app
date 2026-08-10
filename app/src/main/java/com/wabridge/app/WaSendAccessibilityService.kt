@@ -187,17 +187,20 @@ class WaSendAccessibilityService : AccessibilityService() {
         val freshSend = freshRoot?.let { findSendButton(it) }
         if (freshSend != null) {
             val clicked = freshSend.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            searching = false
             if (clicked) {
                 Log.i(TAG, "Send button clicked successfully")
                 EventLog.log("A11y: ✅ נלחץ כפתור שליחה בהצלחה")
+                searching = false
                 SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
-            } else {
-                Log.w(TAG, "Send button click failed")
-                EventLog.log("A11y: ❌ לחיצה על כפתור שליחה נכשלה")
-                SendCoordinator.reportResult(SendCoordinator.Result.FAILED_NO_SEND_BUTTON)
+                return
             }
-            return
+            // The click itself failed even though the node was found -
+            // this looks transient (e.g. button not fully settled yet)
+            // rather than "doesn't exist", so retry the whole
+            // find+click a few more times before giving up, same as the
+            // not-found case below.
+            Log.w(TAG, "Send button found but click failed (attempt $attempt) - retrying")
+            EventLog.log("A11y: ⚠️ כפתור נמצא אך הלחיצה נכשלה, מנסה שוב (ניסיון $attempt)")
         }
 
         if (attempt >= 6) {
