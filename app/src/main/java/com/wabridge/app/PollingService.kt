@@ -36,6 +36,15 @@ class PollingService : Service() {
 
         @Volatile var isRunning = false
             private set
+
+        // Guards against two overlapping send attempts running at once
+        // (observed: the service got started twice in quick succession,
+        // producing two concurrent handlePendingJob() calls for the same
+        // row - the second one silently overwrote SendCoordinator's
+        // state mid-flight, causing a "success" to be reported/marked
+        // sent without the message actually having been typed+sent
+        // correctly).
+        private val processingLock = java.util.concurrent.atomic.AtomicBoolean(false)
     }
 
     private val running = AtomicBoolean(false)
@@ -76,7 +85,16 @@ class PollingService : Service() {
                 val check = httpGet("$webAppUrl?action=check")
                 val json = JSONObject(check)
                 if (json.optBoolean("found", false)) {
-                    handlePendingJob(webAppUrl, json)
+                    if (processingLock.compareAndSet(false, true)) {
+                        try {
+                            handlePendingJob(webAppUrl, json)
+                        } finally {
+                            processingLock.set(false)
+                        }
+                    } else {
+                        Log.w(TAG, "Skipping this cycle - another send is already in progress")
+                        EventLog.log("Poll: ⏭️ מדלג - שליחה אחרת כבר בתהליך (הגנה מפני כפילות)")
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Poll cycle failed", e)

@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 14
-        versionName = "0.14-fix14-retry-click"
+        versionCode = 15
+        versionName = "0.15-fix15-dedup-verify-text"
     }
 
     buildTypes {

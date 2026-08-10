@@ -183,24 +183,39 @@ class WaSendAccessibilityService : AccessibilityService() {
      * (~2.4s total), rather than checking only once.
      */
     private fun searchForSendButtonAfterTyping(attempt: Int) {
+        val job = SendCoordinator.current
+        if (job == null) {
+            // The job was cleared/overwritten from under us (e.g. by a
+            // concurrent attempt) - abort rather than risk clicking send
+            // with unknown/stale text in the box.
+            Log.w(TAG, "Job disappeared mid-send - aborting without clicking")
+            EventLog.log("A11y: ⚠️ העבודה נעלמה תוך כדי (כנראה כפילות) - מבטל בלי ללחוץ")
+            searching = false
+            return
+        }
+
         val freshRoot = rootInActiveWindow
+        val currentEntry = freshRoot?.let { findEditText(it) }
+        val currentEntryText = currentEntry?.text?.toString() ?: ""
         val freshSend = freshRoot?.let { findSendButton(it) }
-        if (freshSend != null) {
+
+        // Safety check: only click Send if the box actually contains the
+        // text we intended to send. This guards against clicking send on
+        // stale/empty/wrong content if state got clobbered by another
+        // concurrent attempt.
+        if (freshSend != null && currentEntryText == job.text) {
             val clicked = freshSend.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             if (clicked) {
                 Log.i(TAG, "Send button clicked successfully")
-                EventLog.log("A11y: ✅ נלחץ כפתור שליחה בהצלחה")
+                EventLog.log("A11y: ✅ נלחץ כפתור שליחה בהצלחה (טקסט אומת: '$currentEntryText')")
                 searching = false
                 SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
                 return
             }
-            // The click itself failed even though the node was found -
-            // this looks transient (e.g. button not fully settled yet)
-            // rather than "doesn't exist", so retry the whole
-            // find+click a few more times before giving up, same as the
-            // not-found case below.
             Log.w(TAG, "Send button found but click failed (attempt $attempt) - retrying")
             EventLog.log("A11y: ⚠️ כפתור נמצא אך הלחיצה נכשלה, מנסה שוב (ניסיון $attempt)")
+        } else if (freshSend != null) {
+            EventLog.log("A11y: ⚠️ כפתור שליחה נמצא אך תוכן התיבה ('$currentEntryText') לא תואם לצפוי ('${job.text}') - לא לוחץ, מנסה שוב")
         }
 
         if (attempt >= 6) {

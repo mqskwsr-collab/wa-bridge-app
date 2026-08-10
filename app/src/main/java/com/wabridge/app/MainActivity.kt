@@ -74,12 +74,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnTogglePolling.setOnClickListener {
+            btnTogglePolling.isEnabled = false // prevent double-tap starting it twice
             val intent = Intent(this, PollingService::class.java)
             if (PollingService.isRunning) {
                 stopService(intent)
             } else {
                 if (Prefs.getWebAppUrl(this).isNullOrBlank()) {
                     Toast.makeText(this, "קודם שמור את כתובת ה-Web App למעלה", Toast.LENGTH_LONG).show()
+                    btnTogglePolling.isEnabled = true
                     return@setOnClickListener
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -89,7 +91,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             // Small delay so isRunning reflects the just-issued command.
-            btnTogglePolling.postDelayed({ updateStatus() }, 300)
+            btnTogglePolling.postDelayed({
+                updateStatus()
+                btnTogglePolling.isEnabled = true
+            }, 500)
         }
     }
 

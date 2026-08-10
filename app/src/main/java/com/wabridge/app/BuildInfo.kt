@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX14-retry-click-2026-08-09"
+    const val BUILD_TAG = "FIX15-dedup-verify-text-2026-08-09"
 }
