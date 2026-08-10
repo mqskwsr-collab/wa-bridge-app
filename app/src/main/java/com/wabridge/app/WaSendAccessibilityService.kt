@@ -377,6 +377,18 @@ class WaSendAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Removes invisible Unicode bidi control characters (RLM, LRM, and
+     * embedding/override/isolate marks) that Android inserts into
+     * accessibility labels for mixed Hebrew/English text - the exact
+     * same class of issue documented and fixed in Code.gs's own
+     * stripBidiMarks() for incoming notification titles. Without this,
+     * an exact string comparison against a plain "שליחה" silently fails
+     * because the real label is actually "\u200Fשליחה" or similar.
+     */
+    private fun stripBidiMarks(s: String): String =
+        s.replace(Regex("[\u200E\u200F\u202A-\u202E\u2066-\u2069]"), "")
+
+    /**
      * Finds the send button. WhatsApp's internal resource id for this has
      * changed across versions historically, so we try several strategies
      * in order rather than relying on exactly one id string.
@@ -423,7 +435,8 @@ class WaSendAccessibilityService : AccessibilityService() {
             // produced a completely wrong, unrelated, non-clickable
             // target. Exact match avoids this false-positive class
             // entirely.
-            val label = node.text?.toString()?.trim() ?: node.contentDescription?.toString()?.trim()
+            val label = node.text?.toString()?.let { stripBidiMarks(it).trim() }
+                ?: node.contentDescription?.toString()?.let { stripBidiMarks(it).trim() }
             if (label != null) {
                 val exactMatches = setOf("Send", "שלח", "שליחה")
                 if (exactMatches.any { it.equals(label, ignoreCase = true) }) return node

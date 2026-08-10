@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
-        versionName = "0.20-fix20-exact-match-send"
+        versionCode = 21
+        versionName = "0.21-fix21-strip-bidi-marks"
     }
 
     buildTypes {
