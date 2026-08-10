@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX12-post-type-diagnostics-2026-08-09"
+    const val BUILD_TAG = "FIX13-hebrew-send-label-2026-08-09"
 }

@@ -311,12 +311,14 @@ class WaSendAccessibilityService : AccessibilityService() {
         node.viewIdResourceName?.let { id ->
             if (id.contains("send", ignoreCase = true)) return node
         }
-        // Strategy 2: content description matching "Send" (English) or
-        // the Hebrew equivalent "שלח" - WhatsApp's UI language follows
-        // the phone's system language, which may differ from the chat
-        // content's language.
-        node.contentDescription?.toString()?.let { desc ->
-            if (desc.equals("Send", ignoreCase = true) || desc.contains("שלח")) return node
+        // Strategy 2: visible text OR content description matching
+        // "Send" (English) or a Hebrew form - diagnostics confirmed
+        // WhatsApp's actual button text is "שליחה" (a noun, "sending"),
+        // not "שלח" (the imperative verb) which was checked before and
+        // is NOT a substring of "שליחה" - both are matched now.
+        val label = node.text?.toString() ?: node.contentDescription?.toString()
+        label?.let { l ->
+            if (l.equals("Send", ignoreCase = true) || l.contains("שלח") || l.contains("שליחה")) return node
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
