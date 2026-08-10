@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
-        versionName = "0.11-fix11-type-before-send-check"
+        versionCode = 12
+        versionName = "0.12-fix12-post-type-diagnostics"
     }
 
     buildTypes {

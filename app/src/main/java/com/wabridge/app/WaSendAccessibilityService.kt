@@ -202,7 +202,11 @@ class WaSendAccessibilityService : AccessibilityService() {
 
         if (attempt >= 6) {
             Log.w(TAG, "Send button still not found after typing (all retries exhausted)")
-            EventLog.log("A11y: ❌ כפתור שליחה עדיין לא נמצא אחרי ${attempt} ניסיונות")
+            val root = rootInActiveWindow
+            val entryNowText = root?.let { findEditText(it) }?.text?.toString() ?: "?"
+            val clickables = mutableListOf<String>()
+            if (root != null) collectClickableInfo(root, clickables, maxCount = 20)
+            EventLog.log("A11y: ❌ כפתור שליחה לא נמצא אחרי הקלדה. תוכן entry עכשיו='$entryNowText' | כפתורים: ${clickables.joinToString(" | ")}")
             searching = false
             SendCoordinator.reportResult(SendCoordinator.Result.FAILED_NO_SEND_BUTTON)
             return
