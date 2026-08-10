@@ -233,50 +233,49 @@ class WaSendAccessibilityService : AccessibilityService() {
 
         val bounds = Rect()
         freshSend.getBoundsInScreen(bounds)
-        if (bounds.width() <= 0 || bounds.height() <= 0) {
-            Log.w(TAG, "Send node has invalid bounds ($bounds)")
-            EventLog.log("A11y: ⚠️ [ניסיון $attempt] גבולות כפתור לא תקינים, ממתין ומנסה שוב")
-            handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 500)
+        val clickableInfo = "class=${freshSend.className} clickable=${freshSend.isClickable} bounds=$bounds"
+        EventLog.log("A11y: 🖱️ [ניסיון $attempt] לוחץ ACTION_CLICK על כפתור ($clickableInfo)")
+        val clickResult = freshSend.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        if (!clickResult) {
+            EventLog.log("A11y: ⚠️ [ניסיון $attempt] ACTION_CLICK החזיר false, ממתין ומנסה שוב")
+            handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 600)
             return
         }
 
-        val x = bounds.centerX().toFloat()
-        val y = bounds.centerY().toFloat()
-        EventLog.log("A11y: 👆 [ניסיון $attempt] הקשה אמיתית על ($x, $y)")
-        val scheduled = performTapGesture(x, y,
-            onSuccess = {
-                Log.i(TAG, "Tap gesture on send button completed")
-                EventLog.log("A11y: ✅ ההקשה בוצעה בהצלחה")
+        // ACTION_CLICK returning true only means Android delivered the
+        // click event - it does NOT guarantee WhatsApp actually acted on
+        // it (observed once: reported success, message stayed in the
+        // box). So verify for real: WhatsApp clears the compose box the
+        // moment a message is actually sent. Check that after a short
+        // delay instead of trusting the return value alone.
+        handler.postDelayed({
+            val checkRoot = rootInActiveWindow
+            val checkEntry = checkRoot?.let { findEditText(it) }
+            val textNow = checkEntry?.text?.toString() ?: ""
+            if (textNow.isBlank()) {
+                Log.i(TAG, "Compose box cleared - send confirmed")
+                EventLog.log("A11y: ✅ תיבת ההודעה התרוקנה - השליחה אומתה בפועל")
                 searching = false
                 SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
-            },
-            onCancelled = {
-                Log.w(TAG, "Tap gesture cancelled (attempt $attempt)")
-                EventLog.log("A11y: ⚠️ ההקשה בוטלה, ממתין רגע לפני ניסיון נוסף")
-                // Wait a FULL second before retrying - dispatching a new
-                // gesture immediately after a cancellation was observed
-                // to just cancel again repeatedly (the system seems to
-                // need the previous gesture to fully clear first).
-                handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 1000)
+            } else {
+                Log.w(TAG, "Compose box still has text after click - not actually sent")
+                EventLog.log("A11y: ❌ [ניסיון $attempt] התיבה עדיין מכילה '$textNow' אחרי הלחיצה - לא נשלח באמת, מנסה שוב")
+                searchForSendButtonAfterTyping(attempt + 1)
             }
-        )
-        if (!scheduled) {
-            Log.w(TAG, "dispatchGesture failed to even start (attempt $attempt)")
-            EventLog.log("A11y: ⚠️ [ניסיון $attempt] לא ניתן היה להתחיל הקשה, ממתין ומנסה שוב")
-            handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 800)
-        }
+        }, 700)
     }
 
     /**
      * Dispatches a real synthesized tap (touch down+up, ~80ms) at the
      * given screen coordinates via the AccessibilityService gesture API.
-     * Reports exactly once via onSuccess or onCancelled - does NOT retry
-     * internally (the caller, searchForSendButtonAfterTyping, owns all
-     * retry/attempt-counting logic to avoid dispatching overlapping
-     * gestures, which was observed to make Android cancel every single
-     * one in a tight, effectively-infinite loop).
-     * Returns false if dispatchGesture couldn't even be scheduled.
+     * NOTE: kept for reference/future use, but NOT currently called -
+     * diagnostics showed dispatchGesture gets cancelled by the system
+     * 100% of the time in this NoxPlayer environment (even with 1s
+     * spacing between attempts, ruling out overlap as the cause), so
+     * ACTION_CLICK + real-outcome verification is used instead (see
+     * searchForSendButtonAfterTyping).
      */
+    @Suppress("unused")
     private fun performTapGesture(x: Float, y: Float, onSuccess: () -> Unit, onCancelled: () -> Unit): Boolean {
         val path = Path().apply { moveTo(x, y) }
         val stroke = GestureDescription.StrokeDescription(path, 0, 80)
@@ -383,6 +382,21 @@ class WaSendAccessibilityService : AccessibilityService() {
      * in order rather than relying on exactly one id string.
      */
     private fun findSendButton(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val candidate = findSendButtonCandidate(node) ?: return null
+        // The matched node (by id/text) might just be an inner icon/label
+        // that isn't itself the actionable element - walk up to the
+        // nearest ancestor that Android reports as actually clickable,
+        // since that's the one performAction(ACTION_CLICK) needs to
+        // target for the click to actually register with the app.
+        var n: AccessibilityNodeInfo? = candidate
+        while (n != null) {
+            if (n.isClickable) return n
+            n = n.parent
+        }
+        return candidate
+    }
+
+    private fun findSendButtonCandidate(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         // Strategy 1: resource id containing "send"
         node.viewIdResourceName?.let { id ->
             if (id.contains("send", ignoreCase = true)) return node
@@ -398,7 +412,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            val found = findSendButton(child)
+            val found = findSendButtonCandidate(child)
             if (found != null) return found
         }
         return null
