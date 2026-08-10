@@ -1,6 +1,7 @@
 package com.wabridge.app
 
 import android.app.Notification
+import android.app.Person
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -59,6 +60,16 @@ class WaNotificationListener : NotificationListenerService() {
             return
         }
 
+        // WhatsApp posts generic system notifications (reconnecting,
+        // syncing, media download progress, etc.) whose title is
+        // literally "WhatsApp" itself rather than a contact/group name -
+        // these were being incorrectly forwarded as if a contact named
+        // "WhatsApp" had messaged. Filter them out.
+        if (Utils.stripBidiMarks(title).trim().equals("WhatsApp", ignoreCase = true)) {
+            Log.d(TAG, "Ignoring generic WhatsApp system notification (title == 'WhatsApp')")
+            return
+        }
+
         val dedupeKey = "$title|$text"
         val now = System.currentTimeMillis()
         if (dedupeKey == lastKey && (now - lastTimestamp) < DEDUPE_WINDOW_MS) {
@@ -68,21 +79,67 @@ class WaNotificationListener : NotificationListenerService() {
         lastKey = dedupeKey
         lastTimestamp = now
 
+        // Capture the notification's own "Reply" action (RemoteInput),
+        // if present - this lets PollingService send the eventual email
+        // reply DIRECTLY through WhatsApp's inline-reply mechanism later,
+        // with no need to open the app, use Accessibility, or already
+        // know this contact's phone number. See ReplyRegistry.
+        val canonicalTarget = Utils.canonicalTarget(title)
+        val actions = sbn.notification.actions
+        if (actions != null) {
+            for (action in actions) {
+                val remoteInputs = action.remoteInputs
+                if (remoteInputs != null && remoteInputs.isNotEmpty()) {
+                    ReplyRegistry.put(
+                        canonicalTarget,
+                        ReplyRegistry.ReplyHandle(action.actionIntent, remoteInputs, now)
+                    )
+                    Log.i(TAG, "Captured reply action for '$canonicalTarget'")
+                    EventLog.log("Listener: 💾 נשמרה פעולת תשובה מהירה עבור '$canonicalTarget'")
+                    break
+                }
+            }
+        }
+
         val webAppUrl = Prefs.getWebAppUrl(this)
         if (webAppUrl.isNullOrBlank()) {
             Log.w(TAG, "No Web App URL configured yet - open the app and set it up. Dropping notification.")
             return
         }
 
-        Log.i(TAG, "WhatsApp notification: title='$title' text='$text' -> forwarding")
-        executor.execute { postToAppsScript(webAppUrl, title, text) }
+        // Best-effort: extract a phone number from the notification's
+        // Person data, if WhatsApp included one (tel: URI). When
+        // present, this lets Code.gs permanently remember this contact
+        // in the Targets sheet automatically, so replies keep working
+        // indefinitely - not just while ReplyRegistry's captured action
+        // is still valid (see ReplyRegistry's doc comment for why that
+        // alone isn't durable long-term).
+        val phone = extractPhoneNumber(sbn)
+
+        Log.i(TAG, "WhatsApp notification: title='$title' text='$text' phone=$phone -> forwarding")
+        executor.execute { postToAppsScript(webAppUrl, title, text, phone) }
     }
 
-    private fun postToAppsScript(webAppUrl: String, title: String, text: String) {
+    private fun extractPhoneNumber(sbn: StatusBarNotification): String? {
+        try {
+            val extras = sbn.notification.extras
+            val person = extras.getParcelable<Person>(Notification.EXTRA_MESSAGING_PERSON)
+            val uri = person?.uri
+            if (uri != null && uri.startsWith("tel:", ignoreCase = true)) {
+                return uri.substring(4).replace(Regex("[^+0-9]"), "")
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "No phone number available from notification Person data", e)
+        }
+        return null
+    }
+
+    private fun postToAppsScript(webAppUrl: String, title: String, text: String, phone: String?) {
         try {
             val body = JSONObject().apply {
                 put("title", title)
                 put("text", text)
+                if (phone != null) put("phone", phone)
             }.toString()
 
             val url = URL(webAppUrl)

@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 23
-        versionName = "0.23-fix23-placeholder-aware-verify"
+        versionCode = 25
+        versionName = "0.25-fix25-auto-phone-capture"
     }
 
     buildTypes {

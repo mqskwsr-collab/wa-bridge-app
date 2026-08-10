@@ -4,11 +4,13 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.RemoteInput
 import android.app.Service
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.os.Bundle
 import android.util.Log
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -123,6 +125,32 @@ class PollingService : Service() {
         EventLog.log("Poll: נמצא תור ממתין - row=$rowNumber target=$target")
         updateNotification("שולח הודעה ל: $target")
 
+        // FAST PATH: if we still have this contact/group's own
+        // notification "Reply" action captured (see ReplyRegistry), send
+        // directly through it - instant, no need to open WhatsApp at
+        // all, and works even for brand-new contacts we've never
+        // manually configured a phone number for.
+        val replyHandle = ReplyRegistry.get(target)
+        if (replyHandle != null) {
+            val sentDirectly = trySendViaReplyAction(replyHandle, text)
+            if (sentDirectly) {
+                Log.i(TAG, "Sent directly via notification reply action for row $rowNumber")
+                EventLog.log("Poll: ⚡ נשלח מיידית דרך פעולת התשובה של ההתראה (בלי לפתוח וואטסאפ בכלל)")
+                try {
+                    httpGet("$webAppUrl?action=markSent&row=$rowNumber")
+                } catch (e: Exception) {
+                    Log.e(TAG, "markSent call failed for row $rowNumber", e)
+                    EventLog.log("Poll: ⚠️ markSent נכשל: ${e.message}")
+                }
+                updateNotification("פעיל - בודק תור כל 20 שניות")
+                return
+            } else {
+                Log.w(TAG, "Reply-action send failed (likely expired) - falling back to opening WhatsApp")
+                EventLog.log("Poll: ⚠️ פעולת התשובה המהירה נכשלה (כנראה פגה) - עובר לשיטה הרגילה")
+                ReplyRegistry.remove(target)
+            }
+        }
+
         val job = SendCoordinator.PendingSend(rowNumber, type, target, text, phoneOrLink)
         val latch = CountDownLatch(1)
         var result: SendCoordinator.Result = SendCoordinator.Result.TIMEOUT
@@ -178,6 +206,32 @@ class PollingService : Service() {
             EventLog.log("Poll: ❌ השליחה לא הצליחה (result=$result), ינסה שוב בסבב הבא")
         }
         updateNotification("פעיל - בודק תור כל 20 שניות")
+    }
+
+    /**
+     * Sends replyText directly through a captured notification "Reply"
+     * action, exactly as if the user had used the inline-reply box in
+     * the notification shade. Returns false if the action is no longer
+     * valid (e.g. PendingIntent.CanceledException - the original
+     * notification was dismissed/replaced since we captured it).
+     */
+    private fun trySendViaReplyAction(handle: ReplyRegistry.ReplyHandle, replyText: String): Boolean {
+        return try {
+            val resultIntent = Intent()
+            val bundle = Bundle()
+            for (ri in handle.remoteInputs) {
+                bundle.putCharSequence(ri.resultKey, replyText)
+            }
+            RemoteInput.addResultsToIntent(handle.remoteInputs, resultIntent, bundle)
+            handle.actionIntent.send(this, 0, resultIntent)
+            true
+        } catch (e: PendingIntent.CanceledException) {
+            Log.w(TAG, "Reply action PendingIntent was cancelled (notification no longer live)", e)
+            false
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected error sending via reply action", e)
+            false
+        }
     }
 
     private fun httpGet(urlStr: String): String {
