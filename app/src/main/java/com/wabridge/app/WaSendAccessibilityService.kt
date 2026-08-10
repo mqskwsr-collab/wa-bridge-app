@@ -141,21 +141,22 @@ class WaSendAccessibilityService : AccessibilityService() {
                     // node info to help identify it if this keeps failing.
                     val clickables = mutableListOf<String>()
                     collectClickableInfo(root, clickables, maxCount = 15)
-                    EventLog.log("A11y: ✏️ entry נמצא (class=${entryNode?.className}), מחפש כפתור שליחה. כפתורים לחיצים: ${clickables.joinToString(" | ")}")
+                    EventLog.log("A11y: ✏️ entry נמצא (class=${entryNode?.className}), אין עדיין כפתור שליחה - זה צפוי לפני הקלדה. כפתורים: ${clickables.joinToString(" | ")}")
                 }
-                handler.postDelayed(this, SEARCH_INTERVAL_MS)
-                return
+                // WhatsApp only shows the Send button once the entry field
+                // has non-empty text - before typing, that slot is
+                // occupied by a microphone (voice message) button
+                // instead. So we don't wait for sendNode here at all -
+                // we go ahead and type now; the send button is searched
+                // for AGAIN after typing, below.
             }
 
-            // Copy to non-null local vals so Kotlin's smart-cast works
-            // correctly inside the nested closure below (a `var` captured
-            // by a lambda can't be smart-cast, since it could
-            // theoretically change between capture and use).
+            // Copy to a non-null local val so Kotlin's smart-cast works
+            // correctly inside the nested closure below.
             val entryNodeFinal: AccessibilityNodeInfo = entryNode!!
-            val sendNodeFinal: AccessibilityNodeInfo = sendNode!!
 
-            Log.i(TAG, "Found entry + send nodes - typing and sending")
-            EventLog.log("A11y: נמצאו שני השדות, מקליד טקסט...")
+            Log.i(TAG, "Found entry node - typing text (send button appears after typing)")
+            EventLog.log("A11y: נמצא entry, מקליד טקסט...")
             val args = Bundle()
             args.putCharSequence(
                 AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
@@ -169,24 +170,45 @@ class WaSendAccessibilityService : AccessibilityService() {
                 return
             }
 
-            // Give WhatsApp a brief moment to enable the send button after
-            // text is entered (some versions disable it for empty input).
-            handler.postDelayed({
-                val freshRoot = rootInActiveWindow
-                val freshSend = freshRoot?.let { findSendButton(it) } ?: sendNodeFinal
-                val clicked = freshSend.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                searching = false
-                if (clicked) {
-                    Log.i(TAG, "Send button clicked successfully")
-                    EventLog.log("A11y: ✅ נלחץ כפתור שליחה בהצלחה")
-                    SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
-                } else {
-                    Log.w(TAG, "Send button click failed")
-                    EventLog.log("A11y: ❌ לחיצה על כפתור שליחה נכשלה")
-                    SendCoordinator.reportResult(SendCoordinator.Result.FAILED_NO_SEND_BUTTON)
-                }
-            }, 500)
+            // Now that text was entered, WhatsApp should swap the mic
+            // button for a Send button - retry a few times over ~3s to
+            // let the UI update, rather than checking only once.
+            searchForSendButtonAfterTyping(attempt = 0)
         }
+    }
+
+    /**
+     * After typing, the Send button may take a moment to render (it
+     * replaces the mic button). Retries up to 6 times, 400ms apart
+     * (~2.4s total), rather than checking only once.
+     */
+    private fun searchForSendButtonAfterTyping(attempt: Int) {
+        val freshRoot = rootInActiveWindow
+        val freshSend = freshRoot?.let { findSendButton(it) }
+        if (freshSend != null) {
+            val clicked = freshSend.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            searching = false
+            if (clicked) {
+                Log.i(TAG, "Send button clicked successfully")
+                EventLog.log("A11y: ✅ נלחץ כפתור שליחה בהצלחה")
+                SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
+            } else {
+                Log.w(TAG, "Send button click failed")
+                EventLog.log("A11y: ❌ לחיצה על כפתור שליחה נכשלה")
+                SendCoordinator.reportResult(SendCoordinator.Result.FAILED_NO_SEND_BUTTON)
+            }
+            return
+        }
+
+        if (attempt >= 6) {
+            Log.w(TAG, "Send button still not found after typing (all retries exhausted)")
+            EventLog.log("A11y: ❌ כפתור שליחה עדיין לא נמצא אחרי ${attempt} ניסיונות")
+            searching = false
+            SendCoordinator.reportResult(SendCoordinator.Result.FAILED_NO_SEND_BUTTON)
+            return
+        }
+
+        handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 400)
     }
 
     /**
