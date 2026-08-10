@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 25
-        versionName = "0.25-fix25-auto-phone-capture"
+        versionCode = 26
+        versionName = "0.26-fix26-visible-poll-errors"
     }
 
     buildTypes {

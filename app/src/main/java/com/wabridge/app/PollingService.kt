@@ -97,9 +97,12 @@ class PollingService : Service() {
                         Log.w(TAG, "Skipping this cycle - another send is already in progress")
                         EventLog.log("Poll: ⏭️ מדלג - שליחה אחרת כבר בתהליך (הגנה מפני כפילות)")
                     }
+                } else {
+                    Log.d(TAG, "check() returned found=false")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Poll cycle failed", e)
+                EventLog.log("Poll: ❌ מחזור נכשל: ${e.javaClass.simpleName}: ${e.message}")
             }
             try {
                 Thread.sleep(POLL_INTERVAL_MS)

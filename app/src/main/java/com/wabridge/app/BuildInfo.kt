@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX25-auto-phone-capture-2026-08-09"
+    const val BUILD_TAG = "FIX26-visible-poll-errors-2026-08-09"
 }
