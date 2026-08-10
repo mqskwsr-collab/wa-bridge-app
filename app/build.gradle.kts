@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 16
-        versionName = "0.16-fix16-real-tap-gesture"
+        versionCode = 17
+        versionName = "0.17-fix17-gesture-retry-fixed"
     }
 
     buildTypes {

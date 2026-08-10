@@ -38,6 +38,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         private const val TAG = "WaBridgeA11y"
         private const val SEARCH_TIMEOUT_MS = 15000L
         private const val SEARCH_INTERVAL_MS = 400L
+        private const val MAX_TAP_ATTEMPTS = 8
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -197,82 +198,86 @@ class WaSendAccessibilityService : AccessibilityService() {
             return
         }
 
-        val freshRoot = rootInActiveWindow
-        val currentEntry = freshRoot?.let { findEditText(it) }
-        val currentEntryText = currentEntry?.text?.toString() ?: ""
-        val freshSend = freshRoot?.let { findSendButton(it) }
-
-        // Safety check: only click Send if the box actually contains the
-        // text we intended to send. This guards against clicking send on
-        // stale/empty/wrong content if state got clobbered by another
-        // concurrent attempt.
-        if (freshSend != null && currentEntryText == job.text) {
-            // Use a real synthesized tap gesture (touch down+up at the
-            // button's actual on-screen coordinates) instead of the
-            // semantic ACTION_CLICK - dispatchGesture(true) from
-            // ACTION_CLICK was observed to report success while WhatsApp
-            // silently ignored it (its send button likely handles raw
-            // touch events rather than standard click listeners). A real
-            // touch is far more likely to trigger the same code path a
-            // human tap would.
-            val bounds = Rect()
-            freshSend.getBoundsInScreen(bounds)
-            if (bounds.width() <= 0 || bounds.height() <= 0) {
-                Log.w(TAG, "Send node has invalid bounds ($bounds) - falling back to ACTION_CLICK")
-                EventLog.log("A11y: ⚠️ גבולות כפתור לא תקינים, מנסה ACTION_CLICK כגיבוי")
-                val clicked = freshSend.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                if (clicked) {
-                    searching = false
-                    EventLog.log("A11y: ✅ נלחץ כפתור שליחה (ACTION_CLICK גיבוי)")
-                    SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
-                    return
-                }
-            } else {
-                val x = bounds.centerX().toFloat()
-                val y = bounds.centerY().toFloat()
-                EventLog.log("A11y: 👆 מבצע הקשה אמיתית על ($x, $y) [כפתור שליחה]")
-                val tapped = performTapGesture(x, y) {
-                    Log.i(TAG, "Tap gesture on send button completed")
-                    EventLog.log("A11y: ✅ הקשה אמיתית על כפתור שליחה בוצעה")
-                    searching = false
-                    SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
-                }
-                if (tapped) {
-                    // Result is reported asynchronously by the gesture
-                    // callback above - don't fall through to retry logic.
-                    return
-                }
-                Log.w(TAG, "dispatchGesture failed to even start - will retry")
-                EventLog.log("A11y: ⚠️ dispatchGesture לא הצליח להתחיל, מנסה שוב")
-            }
-        } else if (freshSend != null) {
-            EventLog.log("A11y: ⚠️ כפתור שליחה נמצא אך תוכן התיבה ('$currentEntryText') לא תואם לצפוי ('${job.text}') - לא לוחץ, מנסה שוב")
-        }
-
-        if (attempt >= 6) {
-            Log.w(TAG, "Send button still not found after typing (all retries exhausted)")
+        if (attempt >= MAX_TAP_ATTEMPTS) {
+            Log.w(TAG, "Send button/tap still not working after $attempt attempts")
             val root = rootInActiveWindow
             val entryNowText = root?.let { findEditText(it) }?.text?.toString() ?: "?"
             val clickables = mutableListOf<String>()
             if (root != null) collectClickableInfo(root, clickables, maxCount = 20)
-            EventLog.log("A11y: ❌ כפתור שליחה לא נמצא אחרי הקלדה. תוכן entry עכשיו='$entryNowText' | כפתורים: ${clickables.joinToString(" | ")}")
+            EventLog.log("A11y: ❌ כפתור שליחה/הקשה לא הצליחו אחרי $attempt ניסיונות. תוכן entry='$entryNowText' | כפתורים: ${clickables.joinToString(" | ")}")
             searching = false
             SendCoordinator.reportResult(SendCoordinator.Result.FAILED_NO_SEND_BUTTON)
             return
         }
 
-        handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 400)
+        val freshRoot = rootInActiveWindow
+        val currentEntry = freshRoot?.let { findEditText(it) }
+        val currentEntryText = currentEntry?.text?.toString() ?: ""
+        val freshSend = freshRoot?.let { findSendButton(it) }
+
+        if (freshSend == null) {
+            EventLog.log("A11y: ✏️ [ניסיון $attempt] עדיין אין כפתור שליחה, ממתין...")
+            handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 500)
+            return
+        }
+
+        // Safety check: only tap Send if the box actually contains the
+        // text we intended to send. This guards against tapping send on
+        // stale/empty/wrong content if state got clobbered by another
+        // concurrent attempt.
+        if (currentEntryText != job.text) {
+            EventLog.log("A11y: ⚠️ [ניסיון $attempt] תוכן התיבה ('$currentEntryText') לא תואם לצפוי - לא לוחץ, ממתין")
+            handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 500)
+            return
+        }
+
+        val bounds = Rect()
+        freshSend.getBoundsInScreen(bounds)
+        if (bounds.width() <= 0 || bounds.height() <= 0) {
+            Log.w(TAG, "Send node has invalid bounds ($bounds)")
+            EventLog.log("A11y: ⚠️ [ניסיון $attempt] גבולות כפתור לא תקינים, ממתין ומנסה שוב")
+            handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 500)
+            return
+        }
+
+        val x = bounds.centerX().toFloat()
+        val y = bounds.centerY().toFloat()
+        EventLog.log("A11y: 👆 [ניסיון $attempt] הקשה אמיתית על ($x, $y)")
+        val scheduled = performTapGesture(x, y,
+            onSuccess = {
+                Log.i(TAG, "Tap gesture on send button completed")
+                EventLog.log("A11y: ✅ ההקשה בוצעה בהצלחה")
+                searching = false
+                SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
+            },
+            onCancelled = {
+                Log.w(TAG, "Tap gesture cancelled (attempt $attempt)")
+                EventLog.log("A11y: ⚠️ ההקשה בוטלה, ממתין רגע לפני ניסיון נוסף")
+                // Wait a FULL second before retrying - dispatching a new
+                // gesture immediately after a cancellation was observed
+                // to just cancel again repeatedly (the system seems to
+                // need the previous gesture to fully clear first).
+                handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 1000)
+            }
+        )
+        if (!scheduled) {
+            Log.w(TAG, "dispatchGesture failed to even start (attempt $attempt)")
+            EventLog.log("A11y: ⚠️ [ניסיון $attempt] לא ניתן היה להתחיל הקשה, ממתין ומנסה שוב")
+            handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 800)
+        }
     }
 
     /**
      * Dispatches a real synthesized tap (touch down+up, ~80ms) at the
      * given screen coordinates via the AccessibilityService gesture API.
-     * onSuccess is invoked when Android confirms the gesture actually
-     * completed; on cancellation/failure, falls back into the normal
-     * retry loop instead.
+     * Reports exactly once via onSuccess or onCancelled - does NOT retry
+     * internally (the caller, searchForSendButtonAfterTyping, owns all
+     * retry/attempt-counting logic to avoid dispatching overlapping
+     * gestures, which was observed to make Android cancel every single
+     * one in a tight, effectively-infinite loop).
      * Returns false if dispatchGesture couldn't even be scheduled.
      */
-    private fun performTapGesture(x: Float, y: Float, onSuccess: () -> Unit): Boolean {
+    private fun performTapGesture(x: Float, y: Float, onSuccess: () -> Unit, onCancelled: () -> Unit): Boolean {
         val path = Path().apply { moveTo(x, y) }
         val stroke = GestureDescription.StrokeDescription(path, 0, 80)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
@@ -281,9 +286,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                 onSuccess()
             }
             override fun onCancelled(gestureDescription: GestureDescription?) {
-                Log.w(TAG, "Tap gesture was cancelled by the system")
-                EventLog.log("A11y: ⚠️ ההקשה בוטלה ע\"י המערכת, מנסה שוב")
-                handler.postDelayed({ searchForSendButtonAfterTyping(1) }, SEARCH_INTERVAL_MS)
+                onCancelled()
             }
         }, null)
     }

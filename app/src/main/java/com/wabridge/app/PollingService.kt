@@ -32,7 +32,7 @@ class PollingService : Service() {
         // How long to wait for the accessibility service to report a
         // result before giving up on this cycle (must exceed the
         // accessibility service's own internal SEARCH_TIMEOUT_MS).
-        private const val SEND_WAIT_TIMEOUT_MS = 19000L
+        private const val SEND_WAIT_TIMEOUT_MS = 25000L
 
         @Volatile var isRunning = false
             private set
