@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.7-fix7-edittext-clear-task"
+        versionCode = 8
+        versionName = "0.8-fix8-important-views"
     }
 
     buildTypes {

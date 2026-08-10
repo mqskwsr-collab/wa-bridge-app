@@ -93,11 +93,24 @@ class WaSendAccessibilityService : AccessibilityService() {
                 val cls = root.className ?: "?"
                 val texts = mutableListOf<String>()
                 collectTexts(root, texts, maxCount = 12)
-                EventLog.log("A11y: 🔍 [+${elapsed / 1000}s] חלון=$pkg/$cls | טקסטים: ${texts.joinToString(" | ").ifBlank { "(אין טקסטים כלל)" }}")
+                val editCount = countMatchingClass(root, "Edit")
+                val windowCount = windows?.size ?: -1
+                EventLog.log("A11y: 🔍 [+${elapsed / 1000}s] חלון=$pkg/$cls | חלונות=$windowCount | nodes עם 'Edit' ב-class=$editCount | טקסטים: ${texts.joinToString(" | ").ifBlank { "(אין טקסטים כלל)" }}")
             }
 
-            val entryNode = findEditText(root)
-            val sendNode = findSendButton(root)
+            // Search across ALL open windows, not just the active one -
+            // WhatsApp's compose bar could conceivably live in a
+            // separate accessibility window (e.g. overlay/IME-adjacent
+            // region) that rootInActiveWindow alone wouldn't include.
+            var entryNode = findEditText(root)
+            var sendNode = findSendButton(root)
+            if (entryNode == null) {
+                windows?.forEach { w ->
+                    val wRoot = w.root ?: return@forEach
+                    if (entryNode == null) entryNode = findEditText(wRoot)
+                    if (sendNode == null) sendNode = findSendButton(wRoot)
+                }
+            }
 
             if (entryNode == null) {
                 // No message box yet - this could be a group invite's
@@ -200,6 +213,16 @@ class WaSendAccessibilityService : AccessibilityService() {
             val child = node.getChild(i) ?: continue
             collectTexts(child, out, maxCount)
         }
+    }
+
+    /** Diagnostic: counts nodes anywhere in the tree whose class name contains the given substring. */
+    private fun countMatchingClass(node: AccessibilityNodeInfo, substr: String): Int {
+        var count = if (node.className?.contains(substr, ignoreCase = true) == true) 1 else 0
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            count += countMatchingClass(child, substr)
+        }
+        return count
     }
 
     /** Finds the first EditText-class node in the tree - WhatsApp's message box. */
