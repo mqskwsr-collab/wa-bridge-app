@@ -1,6 +1,9 @@
 package com.wabridge.app
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
+import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -204,16 +207,44 @@ class WaSendAccessibilityService : AccessibilityService() {
         // stale/empty/wrong content if state got clobbered by another
         // concurrent attempt.
         if (freshSend != null && currentEntryText == job.text) {
-            val clicked = freshSend.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            if (clicked) {
-                Log.i(TAG, "Send button clicked successfully")
-                EventLog.log("A11y: ✅ נלחץ כפתור שליחה בהצלחה (טקסט אומת: '$currentEntryText')")
-                searching = false
-                SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
-                return
+            // Use a real synthesized tap gesture (touch down+up at the
+            // button's actual on-screen coordinates) instead of the
+            // semantic ACTION_CLICK - dispatchGesture(true) from
+            // ACTION_CLICK was observed to report success while WhatsApp
+            // silently ignored it (its send button likely handles raw
+            // touch events rather than standard click listeners). A real
+            // touch is far more likely to trigger the same code path a
+            // human tap would.
+            val bounds = Rect()
+            freshSend.getBoundsInScreen(bounds)
+            if (bounds.width() <= 0 || bounds.height() <= 0) {
+                Log.w(TAG, "Send node has invalid bounds ($bounds) - falling back to ACTION_CLICK")
+                EventLog.log("A11y: ⚠️ גבולות כפתור לא תקינים, מנסה ACTION_CLICK כגיבוי")
+                val clicked = freshSend.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                if (clicked) {
+                    searching = false
+                    EventLog.log("A11y: ✅ נלחץ כפתור שליחה (ACTION_CLICK גיבוי)")
+                    SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
+                    return
+                }
+            } else {
+                val x = bounds.centerX().toFloat()
+                val y = bounds.centerY().toFloat()
+                EventLog.log("A11y: 👆 מבצע הקשה אמיתית על ($x, $y) [כפתור שליחה]")
+                val tapped = performTapGesture(x, y) {
+                    Log.i(TAG, "Tap gesture on send button completed")
+                    EventLog.log("A11y: ✅ הקשה אמיתית על כפתור שליחה בוצעה")
+                    searching = false
+                    SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
+                }
+                if (tapped) {
+                    // Result is reported asynchronously by the gesture
+                    // callback above - don't fall through to retry logic.
+                    return
+                }
+                Log.w(TAG, "dispatchGesture failed to even start - will retry")
+                EventLog.log("A11y: ⚠️ dispatchGesture לא הצליח להתחיל, מנסה שוב")
             }
-            Log.w(TAG, "Send button found but click failed (attempt $attempt) - retrying")
-            EventLog.log("A11y: ⚠️ כפתור נמצא אך הלחיצה נכשלה, מנסה שוב (ניסיון $attempt)")
         } else if (freshSend != null) {
             EventLog.log("A11y: ⚠️ כפתור שליחה נמצא אך תוכן התיבה ('$currentEntryText') לא תואם לצפוי ('${job.text}') - לא לוחץ, מנסה שוב")
         }
@@ -231,6 +262,30 @@ class WaSendAccessibilityService : AccessibilityService() {
         }
 
         handler.postDelayed({ searchForSendButtonAfterTyping(attempt + 1) }, 400)
+    }
+
+    /**
+     * Dispatches a real synthesized tap (touch down+up, ~80ms) at the
+     * given screen coordinates via the AccessibilityService gesture API.
+     * onSuccess is invoked when Android confirms the gesture actually
+     * completed; on cancellation/failure, falls back into the normal
+     * retry loop instead.
+     * Returns false if dispatchGesture couldn't even be scheduled.
+     */
+    private fun performTapGesture(x: Float, y: Float, onSuccess: () -> Unit): Boolean {
+        val path = Path().apply { moveTo(x, y) }
+        val stroke = GestureDescription.StrokeDescription(path, 0, 80)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        return dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                onSuccess()
+            }
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                Log.w(TAG, "Tap gesture was cancelled by the system")
+                EventLog.log("A11y: ⚠️ ההקשה בוטלה ע\"י המערכת, מנסה שוב")
+                handler.postDelayed({ searchForSendButtonAfterTyping(1) }, SEARCH_INTERVAL_MS)
+            }
+        }, null)
     }
 
     /**
