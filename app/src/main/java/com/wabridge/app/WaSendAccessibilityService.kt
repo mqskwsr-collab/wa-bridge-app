@@ -393,7 +393,10 @@ class WaSendAccessibilityService : AccessibilityService() {
             if (n.isClickable) return n
             n = n.parent
         }
-        return candidate
+        // No clickable node anywhere in the ancestor chain - this match
+        // is useless (clicking it is guaranteed to fail), so report "not
+        // found" rather than wasting a retry attempt on a dead click.
+        return null
     }
 
     private fun findSendButtonCandidate(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -411,15 +414,19 @@ class WaSendAccessibilityService : AccessibilityService() {
             node.viewIdResourceName?.let { id ->
                 if (id.contains("send", ignoreCase = true)) return node
             }
-            // Strategy 2: visible text OR content description matching
-            // "Send" (English) or a Hebrew form - diagnostics confirmed
-            // WhatsApp's actual button text is "שליחה" (a noun,
-            // "sending"), not "שלח" (the imperative verb) which was
-            // checked before and is NOT a substring of "שליחה" - both
-            // are matched now.
-            val label = node.text?.toString() ?: node.contentDescription?.toString()
-            label?.let { l ->
-                if (l.equals("Send", ignoreCase = true) || l.contains("שלח") || l.contains("שליחה")) return node
+            // Strategy 2: visible text OR content description EXACTLY
+            // matching a known send-button label (not just "contains"!).
+            // Diagnostics showed a "contains" match on "שלח" was
+            // accidentally matching OLD messages' "נשלח" (delivery
+            // status label, e.g. "Sent"/"נשלח") elsewhere in the chat
+            // history, which also contains "שלח" as a substring - that
+            // produced a completely wrong, unrelated, non-clickable
+            // target. Exact match avoids this false-positive class
+            // entirely.
+            val label = node.text?.toString()?.trim() ?: node.contentDescription?.toString()?.trim()
+            if (label != null) {
+                val exactMatches = setOf("Send", "שלח", "שליחה")
+                if (exactMatches.any { it.equals(label, ignoreCase = true) }) return node
             }
         }
         for (i in 0 until node.childCount) {
