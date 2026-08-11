@@ -129,6 +129,7 @@
         android:textColor="#B00020"
         android:background="#FDEAEA"
         android:padding="8dp"
+        android:textIsSelectable="true"
         android:visibility="gone"
         android:layout_marginBottom="8dp" />
 

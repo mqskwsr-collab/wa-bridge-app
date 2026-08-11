@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 29
-        versionName = "0.29-fix29-crash-fix-and-handler"
+        versionCode = 30
+        versionName = "0.30-fix30-isolate-person-class"
     }
 
     buildTypes {

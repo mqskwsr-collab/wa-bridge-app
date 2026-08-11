@@ -1,7 +1,6 @@
 package com.wabridge.app
 
 import android.app.Notification
-import android.app.Person
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -159,27 +158,18 @@ class WaNotificationListener : NotificationListenerService() {
         // indefinitely - not just while ReplyRegistry's captured action
         // is still valid (see ReplyRegistry's doc comment for why that
         // alone isn't durable long-term).
-        val phone = extractPhoneNumber(sbn)
+        val phone = try {
+            PersonPhoneExtractor.extract(sbn)
+        } catch (e: Throwable) {
+            null
+        }
 
         Log.i(TAG, "WhatsApp notification: title='$title' text='$text' phone=$phone -> forwarding")
         EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
         executor.execute { postToAppsScript(webAppUrl, title, text, phone) }
     }
 
-    private fun extractPhoneNumber(sbn: StatusBarNotification): String? {
-        try {
-            val extras = sbn.notification.extras
-            val person = extras.getParcelable<Person>(Notification.EXTRA_MESSAGING_PERSON)
-            val uri = person?.uri
-            if (uri != null && uri.startsWith("tel:", ignoreCase = true)) {
-                return uri.substring(4).replace(Regex("[^+0-9]"), "")
-            }
-        } catch (e: Exception) {
-            Log.d(TAG, "No phone number available from notification Person data", e)
-        }
-        return null
-    }
-
+    
     private fun postToAppsScript(webAppUrl: String, title: String, text: String, phone: String?) {
         try {
             val body = JSONObject().apply {

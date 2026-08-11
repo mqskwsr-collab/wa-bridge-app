@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX29-crash-fix-and-handler-2026-08-11"
+    const val BUILD_TAG = "FIX30-isolate-person-class-2026-08-11"
 }
