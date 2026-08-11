@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 26
-        versionName = "0.26-fix26-visible-poll-errors"
+        versionCode = 28
+        versionName = "0.28-fix28-request-rebind-nudge"
     }
 
     buildTypes {

@@ -6,11 +6,13 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.RemoteInput
 import android.app.Service
+import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.Bundle
+import android.service.notification.NotificationListenerService
 import android.util.Log
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -77,8 +79,31 @@ class PollingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun pollLoop() {
+        var cycleCount = 0
         while (running.get()) {
             try {
+                // Periodically ask Android to re-bind the notification
+                // listener. Root-caused via the on-screen event log: this
+                // app's process was being killed and restarted by
+                // Android multiple times (evidenced by repeated "Poll:
+                // השירות הופעל" entries hours apart) - PollingService
+                // auto-recovers via START_STICKY, but
+                // NotificationListenerService's system binding does NOT
+                // reliably reconnect on its own after a process death on
+                // this environment. requestRebind() is the official API
+                // for forcing that reconnection.
+                cycleCount++
+                if (cycleCount % 3 == 1) { // roughly every ~1 minute at 20s intervals
+                    try {
+                        NotificationListenerService.requestRebind(
+                            ComponentName(this, WaNotificationListener::class.java)
+                        )
+                        EventLog.log("Poll: 🔄 requestRebind() נקרא (מוודא שהאזנת ההתראות מחוברת)")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "requestRebind failed", e)
+                    }
+                }
+
                 val webAppUrl = Prefs.getWebAppUrl(this)
                 if (webAppUrl.isNullOrBlank()) {
                     Log.w(TAG, "No Web App URL configured - stopping poll loop")

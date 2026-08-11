@@ -55,8 +55,16 @@ class WaNotificationListener : NotificationListenerService() {
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim() ?: ""
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim() ?: ""
 
+        // Log EVERY WhatsApp notification the listener sees, before any
+        // filtering - this is the only way to tell whether the listener
+        // is even receiving events at all (vs. being killed/suspended by
+        // Android in the background) from the on-screen log, since
+        // nothing here was visible in EventLog before this fix.
+        EventLog.log("Listener: 📩 התראת וואטסאפ התקבלה: title='$title' text='${text.take(40)}'")
+
         if (title.isEmpty()) {
             Log.d(TAG, "Ignoring notification with empty title (likely a summary/foreground-service notification)")
+            EventLog.log("Listener: ⏭️ מתעלם - כותרת ריקה (כנראה התראת סיכום/מערכת)")
             return
         }
 
@@ -67,6 +75,7 @@ class WaNotificationListener : NotificationListenerService() {
         // "WhatsApp" had messaged. Filter them out.
         if (Utils.stripBidiMarks(title).trim().equals("WhatsApp", ignoreCase = true)) {
             Log.d(TAG, "Ignoring generic WhatsApp system notification (title == 'WhatsApp')")
+            EventLog.log("Listener: ⏭️ מתעלם - התראת מערכת גנרית ('WhatsApp')")
             return
         }
 
@@ -74,6 +83,7 @@ class WaNotificationListener : NotificationListenerService() {
         val now = System.currentTimeMillis()
         if (dedupeKey == lastKey && (now - lastTimestamp) < DEDUPE_WINDOW_MS) {
             Log.d(TAG, "Ignoring duplicate notification within dedupe window: $dedupeKey")
+            EventLog.log("Listener: ⏭️ מתעלם - כפילות תוך ${DEDUPE_WINDOW_MS}ms")
             return
         }
         lastKey = dedupeKey
@@ -104,6 +114,7 @@ class WaNotificationListener : NotificationListenerService() {
         val webAppUrl = Prefs.getWebAppUrl(this)
         if (webAppUrl.isNullOrBlank()) {
             Log.w(TAG, "No Web App URL configured yet - open the app and set it up. Dropping notification.")
+            EventLog.log("Listener: ⚠️ אין כתובת Web App מוגדרת - ההתראה נזרקה")
             return
         }
 
@@ -117,6 +128,7 @@ class WaNotificationListener : NotificationListenerService() {
         val phone = extractPhoneNumber(sbn)
 
         Log.i(TAG, "WhatsApp notification: title='$title' text='$text' phone=$phone -> forwarding")
+        EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
         executor.execute { postToAppsScript(webAppUrl, title, text, phone) }
     }
 
@@ -157,10 +169,24 @@ class WaNotificationListener : NotificationListenerService() {
             val responseBody = (if (responseCode in 200..299) conn.inputStream else conn.errorStream)
                 ?.bufferedReader()?.use { it.readText() } ?: ""
             Log.i(TAG, "POST result: HTTP $responseCode body=$responseBody")
+            EventLog.log("Listener: ✅ נשלח, HTTP $responseCode: ${responseBody.take(150)}")
             conn.disconnect()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to POST notification to Apps Script", e)
+            EventLog.log("Listener: ❌ שליחה נכשלה: ${e.javaClass.simpleName}: ${e.message}")
         }
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        Log.i(TAG, "Notification listener connected")
+        EventLog.log("Listener: 🔌 שירות ההאזנה להתראות התחבר")
+    }
+
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        Log.w(TAG, "Notification listener disconnected")
+        EventLog.log("Listener: ⚠️ שירות ההאזנה להתראות התנתק")
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
