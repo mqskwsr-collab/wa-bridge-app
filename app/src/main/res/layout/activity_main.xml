@@ -121,6 +121,18 @@
         android:layout_marginBottom="8dp" />
 
     <TextView
+        android:id="@+id/tvLastCrash"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textSize="12sp"
+        android:textColor="#B00020"
+        android:background="#FDEAEA"
+        android:padding="8dp"
+        android:visibility="gone"
+        android:layout_marginBottom="8dp" />
+
+    <TextView
         android:id="@+id/tvLastEvent"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

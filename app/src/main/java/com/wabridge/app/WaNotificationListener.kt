@@ -49,6 +49,21 @@ class WaNotificationListener : NotificationListenerService() {
     private val executor = Executors.newSingleThreadExecutor()
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        try {
+            handleNotification(sbn)
+        } catch (e: Exception) {
+            // Last line of defense: NOTHING in here should ever be
+            // allowed to crash the whole app process - a crash here
+            // takes down PollingService and the Accessibility service
+            // along with it, silently, with zero trace (this is exactly
+            // what happened with the actionIntent NPE bug above before
+            // it was fixed). Log it and move on instead.
+            Log.e(TAG, "Unexpected error handling notification (non-fatal, continuing)", e)
+            EventLog.log("Listener: ❌ שגיאה בלתי צפויה בטיפול בהתראה (לא קריטי): ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private fun handleNotification(sbn: StatusBarNotification) {
         if (sbn.packageName != WHATSAPP_PACKAGE) return
 
         val extras = sbn.notification.extras
@@ -94,21 +109,40 @@ class WaNotificationListener : NotificationListenerService() {
         // reply DIRECTLY through WhatsApp's inline-reply mechanism later,
         // with no need to open the app, use Accessibility, or already
         // know this contact's phone number. See ReplyRegistry.
-        val canonicalTarget = Utils.canonicalTarget(title)
-        val actions = sbn.notification.actions
-        if (actions != null) {
-            for (action in actions) {
-                val remoteInputs = action.remoteInputs
-                if (remoteInputs != null && remoteInputs.isNotEmpty()) {
-                    ReplyRegistry.put(
-                        canonicalTarget,
-                        ReplyRegistry.ReplyHandle(action.actionIntent, remoteInputs, now)
-                    )
-                    Log.i(TAG, "Captured reply action for '$canonicalTarget'")
-                    EventLog.log("Listener: 💾 נשמרה פעולת תשובה מהירה עבור '$canonicalTarget'")
-                    break
+        //
+        // IMPORTANT: wrapped defensively - Notification.Action's fields
+        // (actionIntent in particular) are nullable in the underlying
+        // Java API even though Kotlin's platform-type inference doesn't
+        // always flag that. A null actionIntent here previously caused
+        // an unguarded NullPointerException that crashed the ENTIRE app
+        // process (confirmed via a real "WA Bridge has stopped" crash on
+        // an actual incoming message) - taking down PollingService and
+        // the Accessibility service along with it, and explaining why
+        // messages appeared to just vanish with no log trace at all.
+        try {
+            val canonicalTarget = Utils.canonicalTarget(title)
+            val actions = sbn.notification.actions
+            if (actions != null) {
+                for (action in actions) {
+                    val remoteInputs = action?.remoteInputs
+                    val actionIntent = action?.actionIntent
+                    if (remoteInputs != null && remoteInputs.isNotEmpty() && actionIntent != null) {
+                        ReplyRegistry.put(
+                            canonicalTarget,
+                            ReplyRegistry.ReplyHandle(actionIntent, remoteInputs, now)
+                        )
+                        Log.i(TAG, "Captured reply action for '$canonicalTarget'")
+                        EventLog.log("Listener: 💾 נשמרה פעולת תשובה מהירה עבור '$canonicalTarget'")
+                        break
+                    }
                 }
             }
+        } catch (e: Exception) {
+            // Never let a malformed/unexpected notification action shape
+            // crash the whole listener - this is a "nice to have" fast
+            // path, not something worth risking the entire app for.
+            Log.e(TAG, "Failed to capture reply action (non-fatal, continuing)", e)
+            EventLog.log("Listener: ⚠️ נכשל לשמור פעולת תשובה מהירה (לא קריטי, ממשיך): ${e.javaClass.simpleName}")
         }
 
         val webAppUrl = Prefs.getWebAppUrl(this)

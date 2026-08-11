@@ -45,6 +45,20 @@ class MainActivity : AppCompatActivity() {
             clipboard.setPrimaryClip(ClipData.newPlainText("WA Bridge log", logText))
             Toast.makeText(this, "היומן הועתק - אפשר להדביק בהודעה", Toast.LENGTH_SHORT).show()
         }
+
+        val lastCrash = WaBridgeApplication.getLastCrash(this)
+        val tvLastCrash = findViewById<TextView>(R.id.tvLastCrash)
+        if (lastCrash != null) {
+            tvLastCrash.visibility = android.view.View.VISIBLE
+            tvLastCrash.text = "⚠️ קריסה אחרונה שנתפסה:\n$lastCrash"
+            tvLastCrash.setOnClickListener {
+                val clipboard = getSystemService(ClipboardManager::class.java)
+                clipboard.setPrimaryClip(ClipData.newPlainText("WA Bridge crash", lastCrash))
+                Toast.makeText(this, "פרטי הקריסה הועתקו", Toast.LENGTH_SHORT).show()
+                WaBridgeApplication.clearLastCrash(this)
+                tvLastCrash.visibility = android.view.View.GONE
+            }
+        }
         etWebAppUrl = findViewById(R.id.etWebAppUrl)
         val btnGrantAccess = findViewById<Button>(R.id.btnGrantAccess)
         val btnSaveUrl = findViewById<Button>(R.id.btnSaveUrl)

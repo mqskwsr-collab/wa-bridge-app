@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 28
-        versionName = "0.28-fix28-request-rebind-nudge"
+        versionCode = 29
+        versionName = "0.29-fix29-crash-fix-and-handler"
     }
 
     buildTypes {
