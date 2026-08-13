@@ -39,6 +39,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         private const val SEARCH_TIMEOUT_MS = 15000L
         private const val SEARCH_INTERVAL_MS = 400L
         private const val MAX_TAP_ATTEMPTS = 8
+        private const val LEARN_TIMEOUT_MS = 15000L
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -53,20 +54,36 @@ class WaSendAccessibilityService : AccessibilityService() {
     // per job.
     private var clickedIntermediateScreen = false
 
+    // --- Group-link learning state (separate from the send flow above) ---
+    private var learning = false
+    private var learnStartTime = 0L
+    private var learnStage = 0 // 0=find/click group header, 1=find/click "Invite via link", 2=read link text
+    private var lastLearnDumpTime = 0L
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
-        if (!SendCoordinator.hasPendingJob()) return
-        if (searching) return // already trying for the current job
 
-        Log.i(TAG, "WhatsApp window state changed and a job is pending - starting search")
-        EventLog.log("A11y: חלון וואטסאפ השתנה, מתחיל לחפש שדה הודעה+שליחה")
-        searching = true
-        searchStartTime = System.currentTimeMillis()
-        clickedIntermediateScreen = false
-        lastDiagnosticDumpTime = 0L
-        lastSendDumpTime = 0L
-        handler.post(searchRunnable)
+        if (SendCoordinator.hasPendingJob() && !searching) {
+            Log.i(TAG, "WhatsApp window state changed and a job is pending - starting search")
+            EventLog.log("A11y: חלון וואטסאפ השתנה, מתחיל לחפש שדה הודעה+שליחה")
+            searching = true
+            searchStartTime = System.currentTimeMillis()
+            clickedIntermediateScreen = false
+            lastDiagnosticDumpTime = 0L
+            lastSendDumpTime = 0L
+            handler.post(searchRunnable)
+        }
+
+        if (LearnCoordinator.hasPendingLearn() && !learning) {
+            Log.i(TAG, "WhatsApp window state changed and a group-link learn is pending - starting")
+            EventLog.log("A11y-Learn: חלון וואטסאפ השתנה, מתחיל תהליך למידת קישור")
+            learning = true
+            learnStartTime = System.currentTimeMillis()
+            learnStage = 0
+            lastLearnDumpTime = 0L
+            handler.post(learnRunnable)
+        }
     }
 
     private val searchRunnable = object : Runnable {
@@ -296,6 +313,110 @@ class WaSendAccessibilityService : AccessibilityService() {
                 onCancelled()
             }
         }, null)
+    }
+
+    /**
+     * Automatically learns a group's invite link: clicks the group name
+     * in the toolbar (opens Group Info), finds and clicks the "Invite
+     * via link" option, then reads the link text off-screen - the same
+     * steps a human would take, performed by the app. Diagnostic dumps
+     * are included since the exact screen text/layout for this flow is
+     * unverified until tested for real (same iterative pattern used to
+     * get the send flow working).
+     */
+    private val learnRunnable = object : Runnable {
+        override fun run() {
+            val job = LearnCoordinator.current
+            if (job == null) {
+                learning = false
+                return
+            }
+
+            val elapsed = System.currentTimeMillis() - learnStartTime
+            if (elapsed > LEARN_TIMEOUT_MS) {
+                Log.w(TAG, "Timed out learning group link (stage=$learnStage)")
+                EventLog.log("A11y-Learn: ❌ Timeout בשלב $learnStage")
+                learning = false
+                LearnCoordinator.reportResult(LearnCoordinator.Result.TIMEOUT)
+                return
+            }
+
+            val root = rootInActiveWindow
+            if (root == null) {
+                handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                return
+            }
+
+            if (elapsed - lastLearnDumpTime > 2000L) {
+                lastLearnDumpTime = elapsed
+                val texts = mutableListOf<String>()
+                collectTexts(root, texts, maxCount = 15)
+                EventLog.log("A11y-Learn: 🔍 [שלב $learnStage, +${elapsed / 1000}s] טקסטים: ${texts.joinToString(" | ")}")
+            }
+
+            when (learnStage) {
+                0 -> {
+                    // Click the group name in the toolbar to open Group Info.
+                    // The exact group name text should appear on-screen and
+                    // be clickable (it's the conversation title).
+                    val header = findClickableByText(root, listOf(job.target))
+                    if (header != null) {
+                        Log.i(TAG, "Found group header - clicking to open Group Info")
+                        EventLog.log("A11y-Learn: נמצאה כותרת הקבוצה, לוחץ לפתיחת פרטי קבוצה")
+                        header.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        learnStage = 1
+                    }
+                    handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                }
+                1 -> {
+                    // Look for the "Invite via link" option - try several
+                    // known label variants (English + Hebrew).
+                    val inviteCandidates = listOf(
+                        "Invite via link", "Invite to group via link",
+                        "הזמנה לקבוצה באמצעות קישור", "הזמנה בקישור", "הזמנה דרך קישור"
+                    )
+                    val inviteBtn = findClickableByText(root, inviteCandidates)
+                        ?: findClickableContaining(root, listOf("קישור", "link", "Link"))
+                    if (inviteBtn != null) {
+                        Log.i(TAG, "Found 'Invite via link' option - clicking")
+                        EventLog.log("A11y-Learn: נמצא \"הזמנה בקישור\", לוחץ")
+                        inviteBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        learnStage = 2
+                    }
+                    handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                }
+                2 -> {
+                    // Look for a node whose text IS the invite link itself.
+                    val linkTexts = mutableListOf<String>()
+                    collectTexts(root, linkTexts, maxCount = 30)
+                    val link = linkTexts.firstOrNull { it.contains("chat.whatsapp.com") }
+                    if (link != null) {
+                        Log.i(TAG, "Found group invite link: $link")
+                        EventLog.log("A11y-Learn: ✅ קישור נמצא: $link")
+                        learning = false
+                        LearnCoordinator.reportResult(LearnCoordinator.Result.SUCCESS, link)
+                    } else {
+                        handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Like findClickableByText but matches if the candidate is CONTAINED in the node's text (broader, last-resort). */
+    private fun findClickableContaining(node: AccessibilityNodeInfo, candidates: List<String>): AccessibilityNodeInfo? {
+        val text = node.text?.toString() ?: node.contentDescription?.toString()
+        if (node.isClickable && text != null) {
+            for (candidate in candidates) {
+                if (text.contains(candidate, ignoreCase = true)) return node
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findClickableContaining(child, candidates)
+            if (found != null) return found
+        }
+        return null
     }
 
     /**

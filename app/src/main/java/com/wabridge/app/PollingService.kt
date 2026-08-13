@@ -32,7 +32,7 @@ class PollingService : Service() {
         private const val TAG = "WaBridgePoll"
         private const val CHANNEL_ID = "wa_bridge_polling"
         private const val NOTIFICATION_ID = 1001
-        private const val POLL_INTERVAL_MS = 20000L
+        private const val POLL_INTERVAL_MS = 45000L
         // How long to wait for the accessibility service to report a
         // result before giving up on this cycle (must exceed the
         // accessibility service's own internal SEARCH_TIMEOUT_MS).

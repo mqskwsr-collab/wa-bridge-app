@@ -21,14 +21,19 @@ object PersonPhoneExtractor {
             val person = extras.getParcelable<android.app.Person>(Notification.EXTRA_MESSAGING_PERSON)
             val uri = person?.uri
             if (uri != null && uri.startsWith("tel:", ignoreCase = true)) {
-                uri.substring(4).replace(Regex("[^+0-9]"), "")
+                val phone = uri.substring(4).replace(Regex("[^+0-9]"), "")
+                EventLog.log("PhoneExtract: ✅ מספר חולץ מההתראה: $phone")
+                phone
             } else {
+                EventLog.log("PhoneExtract: ⏭️ אין URI מסוג tel: בנתוני ה-Person (person=$person, uri=$uri)")
                 null
             }
         } catch (e: Throwable) {
-            // Catches NoClassDefFoundError too (not just Exception) -
-            // this is exactly the failure mode that was crashing the
-            // whole app before this class was isolated.
+            // Catches NoClassDefFoundError too (not just Exception) - this
+            // was confirmed to actually happen on this device (the
+            // android.app.Person class itself is missing at runtime),
+            // which is exactly why this is isolated in its own class.
+            EventLog.log("PhoneExtract: ❌ נכשל (${e.javaClass.simpleName}: ${e.message}) - כנראה android.app.Person חסר במכשיר הזה")
             null
         }
     }

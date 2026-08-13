@@ -151,6 +151,30 @@ class WaNotificationListener : NotificationListenerService() {
             return
         }
 
+        // Detect group vs private using Android's own MessagingStyle flag
+        // instead of a manually-maintained group-name whitelist - this
+        // means brand new groups are recognized automatically, with no
+        // code edits ever required.
+        val canonicalTarget = Utils.canonicalTarget(title)
+        val isGroup = GroupDetector.isGroupConversation(sbn)
+        EventLog.log("Listener: 🔍 isGroupConversation=$isGroup עבור '$canonicalTarget'")
+
+        // Capture the notification's contentIntent (opens straight into
+        // this exact conversation, no invite link needed) - used below
+        // to automatically learn a new group's invite link the first
+        // time it messages in.
+        try {
+            val contentIntent = sbn.notification.contentIntent
+            if (contentIntent != null) {
+                OpenIntentRegistry.put(canonicalTarget, contentIntent)
+            }
+            if (isGroup == true) {
+                GroupLinkLearner.maybeLearnGroupLink(this, canonicalTarget, contentIntent, webAppUrl)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to capture/process contentIntent (non-fatal)", e)
+        }
+
         // Best-effort: extract a phone number from the notification's
         // Person data, if WhatsApp included one (tel: URI). When
         // present, this lets Code.gs permanently remember this contact
@@ -164,18 +188,19 @@ class WaNotificationListener : NotificationListenerService() {
             null
         }
 
-        Log.i(TAG, "WhatsApp notification: title='$title' text='$text' phone=$phone -> forwarding")
+        Log.i(TAG, "WhatsApp notification: title='$title' text='$text' phone=$phone isGroup=$isGroup -> forwarding")
         EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
-        executor.execute { postToAppsScript(webAppUrl, title, text, phone) }
+        executor.execute { postToAppsScript(webAppUrl, title, text, phone, isGroup) }
     }
 
     
-    private fun postToAppsScript(webAppUrl: String, title: String, text: String, phone: String?) {
+    private fun postToAppsScript(webAppUrl: String, title: String, text: String, phone: String?, isGroup: Boolean?) {
         try {
             val body = JSONObject().apply {
                 put("title", title)
                 put("text", text)
                 if (phone != null) put("phone", phone)
+                if (isGroup != null) put("isGroup", isGroup)
             }.toString()
 
             val url = URL(webAppUrl)
