@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 33
-        versionName = "0.33-fix33-verbose-diagnostics"
+        versionCode = 34
+        versionName = "0.34-fix34-compat-person-phone"
     }
 
     buildTypes {

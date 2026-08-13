@@ -146,6 +146,7 @@ class PollingService : Service() {
 
         if (rowNumber < 0 || phoneOrLink.isBlank()) {
             Log.w(TAG, "Pending job missing rowNumber/phoneOrLink, skipping this cycle: $json")
+            EventLog.log("Poll: ⚠️ נמצאה שורה ממתינה (row=$rowNumber, target=$target) אך אין phoneOrLink - מדלג. תוסיף את '$target' ידנית לטאב Targets.")
             return
         }
 

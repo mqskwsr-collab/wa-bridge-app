@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX33-verbose-diagnostics-2026-08-11"
+    const val BUILD_TAG = "FIX34-compat-person-phone-2026-08-13"
 }
