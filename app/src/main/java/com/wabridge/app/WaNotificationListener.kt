@@ -108,6 +108,22 @@ class WaNotificationListener : NotificationListenerService() {
         lastKey = dedupeKey
         lastTimestamp = now
 
+        // Detect group vs private using Android's own MessagingStyle flag
+        // instead of a manually-maintained group-name whitelist - this
+        // means brand new groups are recognized automatically, with no
+        // code edits ever required.
+        //
+        // FIX38: this must run BEFORE computing canonicalTarget (moved up
+        // from further below) - canonicalTarget's group-name extraction
+        // needs to know isGroup up front to correctly strip WhatsApp's
+        // "GroupName: SenderName" title format for brand-new groups (see
+        // Utils.canonicalTarget's doc comment for the real incident this
+        // fixes). Previously isGroup was computed AFTER the reply-action
+        // capture below, which used the old (uncorrected) target.
+        val isGroup = GroupDetector.isGroupConversation(sbn)
+        val canonicalTarget = Utils.canonicalTarget(title, isGroup)
+        EventLog.log("Listener: 🔍 isGroupConversation=$isGroup עבור '$canonicalTarget'")
+
         // Capture the notification's own "Reply" action (RemoteInput),
         // if present - this lets PollingService send the eventual email
         // reply DIRECTLY through WhatsApp's inline-reply mechanism later,
@@ -124,7 +140,6 @@ class WaNotificationListener : NotificationListenerService() {
         // the Accessibility service along with it, and explaining why
         // messages appeared to just vanish with no log trace at all.
         try {
-            val canonicalTarget = Utils.canonicalTarget(title)
             val actions = sbn.notification.actions
             if (actions != null) {
                 for (action in actions) {
@@ -155,14 +170,6 @@ class WaNotificationListener : NotificationListenerService() {
             EventLog.log("Listener: ⚠️ אין כתובת Web App מוגדרת - ההתראה נזרקה")
             return
         }
-
-        // Detect group vs private using Android's own MessagingStyle flag
-        // instead of a manually-maintained group-name whitelist - this
-        // means brand new groups are recognized automatically, with no
-        // code edits ever required.
-        val canonicalTarget = Utils.canonicalTarget(title)
-        val isGroup = GroupDetector.isGroupConversation(sbn)
-        EventLog.log("Listener: 🔍 isGroupConversation=$isGroup עבור '$canonicalTarget'")
 
         // Capture the notification's contentIntent (opens straight into
         // this exact conversation, no invite link needed) - used below
