@@ -40,7 +40,21 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.tvBuildTag).text = "גרסה מותקנת: ${BuildInfo.BUILD_TAG}"
 
         findViewById<Button>(R.id.btnCopyLog).setOnClickListener {
-            val logText = EventLog.getAll()
+            // FIX37: a real crash (TransactionTooLargeException, ~1MB
+            // clipboard parcel) confirmed the accumulated log text can
+            // exceed Android's Binder transaction size limit (~1MB,
+            // shared across the whole process, not just this call).
+            // Truncate defensively before copying so this can never
+            // crash the whole app again, regardless of how large the
+            // in-memory log ever grows.
+            val fullLogText = EventLog.getAll()
+            val maxChars = 200_000
+            val logText = if (fullLogText.length > maxChars) {
+                "... (היומן קוצר - מוצגים ${maxChars} התווים האחרונים מתוך ${fullLogText.length}) ...\n" +
+                    fullLogText.takeLast(maxChars)
+            } else {
+                fullLogText
+            }
             val clipboard = getSystemService(ClipboardManager::class.java)
             clipboard.setPrimaryClip(ClipData.newPlainText("WA Bridge log", logText))
             Toast.makeText(this, "היומן הועתק - אפשר להדביק בהודעה", Toast.LENGTH_SHORT).show()
@@ -53,7 +67,8 @@ class MainActivity : AppCompatActivity() {
             tvLastCrash.text = "⚠️ קריסה אחרונה שנתפסה:\n$lastCrash"
             tvLastCrash.setOnClickListener {
                 val clipboard = getSystemService(ClipboardManager::class.java)
-                clipboard.setPrimaryClip(ClipData.newPlainText("WA Bridge crash", lastCrash))
+                val crashText = if (lastCrash.length > 200_000) lastCrash.takeLast(200_000) else lastCrash
+                clipboard.setPrimaryClip(ClipData.newPlainText("WA Bridge crash", crashText))
                 Toast.makeText(this, "פרטי הקריסה הועתקו", Toast.LENGTH_SHORT).show()
                 WaBridgeApplication.clearLastCrash(this)
                 tvLastCrash.visibility = android.view.View.GONE

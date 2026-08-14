@@ -8,6 +8,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -31,20 +32,56 @@ object GroupLinkLearner {
     // first attempt failed transiently (e.g. WhatsApp screen not ready).
     private const val RETRY_COOLDOWN_MS = 30 * 60 * 1000L // 30 minutes
 
+    // Dedicated single-thread executor, separate from
+    // WaNotificationListener's own posting executor. CRITICAL FIX
+    // (FIX37): this function used to be called directly from
+    // onNotificationPosted() and blocks on a CountDownLatch for up to
+    // LEARN_WAIT_TIMEOUT_MS (20 seconds). Calling it inline blocked the
+    // notification listener's own callback thread for up to 20s on
+    // EVERY group message - a plausible real contributor to the
+    // listener "falling"/getting rebound documented in section 6.4,
+    // since Android can consider a service unresponsive if its callback
+    // thread doesn't return promptly. Now the public entry point returns
+    // immediately and the actual (blocking) work happens on this
+    // dedicated background thread instead.
+    private val learnExecutor = Executors.newSingleThreadExecutor()
+
     fun maybeLearnGroupLink(context: Context, target: String, contentIntent: PendingIntent?, webAppUrl: String?) {
         if (contentIntent == null || webAppUrl.isNullOrBlank()) return
+        // Fire-and-forget from the caller's perspective - the caller
+        // (WaNotificationListener.onNotificationPosted) must never block.
+        learnExecutor.execute {
+            try {
+                doLearn(context.applicationContext, target, contentIntent, webAppUrl)
+            } catch (e: Exception) {
+                Log.e(TAG, "Unexpected error during group link learn (non-fatal)", e)
+                EventLog.log("Learn: ❌ שגיאה בלתי צפויה בתהליך למידת קישור: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+    }
 
+    private fun doLearn(context: Context, target: String, contentIntent: PendingIntent, webAppUrl: String) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val lastAttempt = prefs.getLong(key(target), 0L)
         val now = System.currentTimeMillis()
         if (now - lastAttempt < RETRY_COOLDOWN_MS) {
+            val remainingMin = (RETRY_COOLDOWN_MS - (now - lastAttempt)) / 60000L
             Log.d(TAG, "Skipping learn for '$target' - attempted recently")
+            // Previously silent (Log.d only, invisible without Logcat) -
+            // this made it impossible to tell, from the on-screen log
+            // alone, whether learning was ever attempted for a given
+            // group vs. simply skipped due to cooldown. Confirmed via a
+            // real incident: a group message came in, isGroupConversation
+            // correctly detected true, yet zero "Learn:" lines appeared
+            // anywhere in the log - this line is why.
+            EventLog.log("Learn: ⏭️ מדלג על למידת קישור עבור '$target' - ניסיון קודם לפני פחות מ-30 דק' (עוד כ-${remainingMin} דק' עד ניסיון הבא)")
             return
         }
         prefs.edit().putLong(key(target), now).apply()
 
         if (LearnCoordinator.hasPendingLearn()) {
             Log.d(TAG, "Skipping learn for '$target' - another learn already in progress")
+            EventLog.log("Learn: ⏭️ מדלג על למידת קישור עבור '$target' - תהליך למידה אחר כבר רץ כרגע")
             return
         }
 

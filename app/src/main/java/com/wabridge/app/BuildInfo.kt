@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX36-listener-heartbeat-2026-08-14"
+    const val BUILD_TAG = "FIX37-learn-offmain-cliptrunc-2026-08-14"
 }
