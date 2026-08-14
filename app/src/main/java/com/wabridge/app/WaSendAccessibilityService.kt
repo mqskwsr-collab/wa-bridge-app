@@ -426,8 +426,22 @@ class WaSendAccessibilityService : AccessibilityService() {
      * landing screen's CTA button.
      */
     private fun findClickableByText(node: AccessibilityNodeInfo, candidates: List<String>): AccessibilityNodeInfo? {
+        val match = findTextMatch(node, candidates) ?: return null
+        // Same fix as findSendButton: the matched text node might just be
+        // a label inside a larger clickable container (e.g. the toolbar
+        // title area) - walk up to the nearest actually-clickable
+        // ancestor, since that's what needs to be clicked.
+        var n: AccessibilityNodeInfo? = match
+        while (n != null) {
+            if (n.isClickable) return n
+            n = n.parent
+        }
+        return null
+    }
+
+    private fun findTextMatch(node: AccessibilityNodeInfo, candidates: List<String>): AccessibilityNodeInfo? {
         val text = node.text?.toString() ?: node.contentDescription?.toString()
-        if (node.isClickable && text != null) {
+        if (text != null) {
             for (candidate in candidates) {
                 if (text.equals(candidate, ignoreCase = true) || text.startsWith(candidate, ignoreCase = true)) {
                     return node
@@ -436,7 +450,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            val found = findClickableByText(child, candidates)
+            val found = findTextMatch(child, candidates)
             if (found != null) return found
         }
         return null
