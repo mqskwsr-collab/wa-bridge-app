@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX35-clickable-ancestor-walk-2026-08-13"
+    const val BUILD_TAG = "FIX36-listener-heartbeat-2026-08-14"
 }

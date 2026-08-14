@@ -33,6 +33,11 @@ class WaNotificationListener : NotificationListenerService() {
         private const val TAG = "WaBridge"
         private const val WHATSAPP_PACKAGE = "com.whatsapp"
 
+        // Explicit connection-state heartbeat, so PollingService can log
+        // "is the listener actually connected right now" on every poll
+        // cycle - not just retroactively inferred from missing messages.
+        @Volatile var isConnected = false
+
         // In-memory de-duplication: Android can re-post/update the same
         // logical notification multiple times in quick succession (e.g.
         // when a second message arrives before the first is dismissed).
@@ -228,12 +233,14 @@ class WaNotificationListener : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        isConnected = true
         Log.i(TAG, "Notification listener connected")
         EventLog.log("Listener: 🔌 שירות ההאזנה להתראות התחבר")
     }
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
+        isConnected = false
         Log.w(TAG, "Notification listener disconnected")
         EventLog.log("Listener: ⚠️ שירות ההאזנה להתראות התנתק")
     }

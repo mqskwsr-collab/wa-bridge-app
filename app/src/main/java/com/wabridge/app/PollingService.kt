@@ -82,26 +82,21 @@ class PollingService : Service() {
         var cycleCount = 0
         while (running.get()) {
             try {
-                // Periodically ask Android to re-bind the notification
-                // listener. Root-caused via the on-screen event log: this
-                // app's process was being killed and restarted by
-                // Android multiple times (evidenced by repeated "Poll:
-                // השירות הופעל" entries hours apart) - PollingService
-                // auto-recovers via START_STICKY, but
-                // NotificationListenerService's system binding does NOT
-                // reliably reconnect on its own after a process death on
-                // this environment. requestRebind() is the official API
-                // for forcing that reconnection.
                 cycleCount++
-                if (cycleCount % 3 == 1) { // roughly every ~1 minute at 20s intervals
-                    try {
-                        NotificationListenerService.requestRebind(
-                            ComponentName(this, WaNotificationListener::class.java)
-                        )
-                        EventLog.log("Poll: 🔄 requestRebind() נקרא (מוודא שהאזנת ההתראות מחוברת)")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "requestRebind failed", e)
-                    }
+                // Log a heartbeat EVERY cycle showing whether the
+                // notification listener is actually connected right now
+                // (not inferred retroactively from a missing message) -
+                // and nudge a rebind every cycle too (cheap, and this was
+                // previously only every ~3rd cycle which may have left
+                // too wide a gap during a real disconnect).
+                val listenerConnected = WaNotificationListener.isConnected
+                EventLog.log("Poll: 💓 מצב מאזין=${if (listenerConnected) "מחובר ✅" else "מנותק ❌"}")
+                try {
+                    NotificationListenerService.requestRebind(
+                        ComponentName(this, WaNotificationListener::class.java)
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "requestRebind failed", e)
                 }
 
                 val webAppUrl = Prefs.getWebAppUrl(this)

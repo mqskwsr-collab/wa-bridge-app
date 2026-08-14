@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 35
-        versionName = "0.35-fix35-clickable-ancestor-walk"
+        versionCode = 36
+        versionName = "0.36-fix36-listener-heartbeat"
     }
 
     buildTypes {
