@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX38-group-target-splitting-2026-08-14"
+    const val BUILD_TAG = "FIX39-invite-label-match-2026-08-14"
 }

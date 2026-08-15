@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 36
-        versionName = "0.36-fix36-listener-heartbeat"
+        versionCode = 39
+        versionName = "0.39-fix39-invite-label-match"
     }
 
     buildTypes {

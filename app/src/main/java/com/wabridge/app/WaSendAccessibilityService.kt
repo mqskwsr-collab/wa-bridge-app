@@ -370,16 +370,21 @@ class WaSendAccessibilityService : AccessibilityService() {
                 }
                 1 -> {
                     // Look for the "Invite via link" option - try several
-                    // known label variants (English + Hebrew).
+                    // known label variants (English + Hebrew). Diagnostics
+                    // confirmed the actual button here is just plain
+                    // "הזמנה" (not "הזמנה בקישור" or similar longer
+                    // phrasing that was originally guessed) - added as the
+                    // primary candidate.
                     val inviteCandidates = listOf(
+                        "הזמנה", "Invite",
                         "Invite via link", "Invite to group via link",
                         "הזמנה לקבוצה באמצעות קישור", "הזמנה בקישור", "הזמנה דרך קישור"
                     )
                     val inviteBtn = findClickableByText(root, inviteCandidates)
-                        ?: findClickableContaining(root, listOf("קישור", "link", "Link"))
+                        ?: findClickableContaining(root, listOf("קישור", "link", "Link", "הזמנה", "Invite"))
                     if (inviteBtn != null) {
-                        Log.i(TAG, "Found 'Invite via link' option - clicking")
-                        EventLog.log("A11y-Learn: נמצא \"הזמנה בקישור\", לוחץ")
+                        Log.i(TAG, "Found 'Invite' option - clicking")
+                        EventLog.log("A11y-Learn: נמצא \"הזמנה\", לוחץ")
                         inviteBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                         learnStage = 2
                     }
