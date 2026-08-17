@@ -182,6 +182,8 @@ class WaNotificationListener : NotificationListenerService() {
             }
             if (isGroup == true) {
                 GroupLinkLearner.maybeLearnGroupLink(this, canonicalTarget, contentIntent, webAppUrl)
+            } else if (isGroup == false) {
+                PhoneLearnLearner.maybeLearnPhone(this, canonicalTarget, contentIntent, webAppUrl)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to capture/process contentIntent (non-fatal)", e)

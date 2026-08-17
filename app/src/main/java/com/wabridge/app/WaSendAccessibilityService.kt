@@ -60,6 +60,12 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var learnStage = 0 // 0=find/click group header, 1=find/click "Invite via link", 2=read link text
     private var lastLearnDumpTime = 0L
 
+    // --- Phone-number learning state (separate from both flows above) ---
+    private var phoneLearning = false
+    private var phoneLearnStartTime = 0L
+    private var phoneLearnStage = 0 // 0=find/click contact header, 1=scan for a phone-shaped string
+    private var lastPhoneLearnDumpTime = 0L
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
@@ -83,6 +89,16 @@ class WaSendAccessibilityService : AccessibilityService() {
             learnStage = 0
             lastLearnDumpTime = 0L
             handler.post(learnRunnable)
+        }
+
+        if (PhoneLearnCoordinator.hasPendingLearn() && !phoneLearning) {
+            Log.i(TAG, "WhatsApp window state changed and a phone-learn is pending - starting")
+            EventLog.log("A11y-PhoneLearn: חלון וואטסאפ השתנה, מתחיל תהליך למידת מספר")
+            phoneLearning = true
+            phoneLearnStartTime = System.currentTimeMillis()
+            phoneLearnStage = 0
+            lastPhoneLearnDumpTime = 0L
+            handler.post(phoneLearnRunnable)
         }
     }
 
@@ -400,6 +416,80 @@ class WaSendAccessibilityService : AccessibilityService() {
                         EventLog.log("A11y-Learn: ✅ קישור נמצא: $link")
                         learning = false
                         LearnCoordinator.reportResult(LearnCoordinator.Result.SUCCESS, link)
+                    } else {
+                        handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * EXPERIMENTAL phone-number learning (new, 14.8.2026 - mirrors the
+     * proven group-link learnRunnable pattern, applied to private
+     * contacts): stage 0 clicks the contact's name in the toolbar to
+     * open "Contact Info"; stage 1 scans that screen's text for a
+     * phone-number-shaped string. Untested live as of writing - watch
+     * the "A11y-PhoneLearn:" diagnostic dumps closely on first use,
+     * exactly like every other new automation flow in this project
+     * needed iteration before working.
+     */
+    private val phoneLearnRunnable = object : Runnable {
+        override fun run() {
+            val job = PhoneLearnCoordinator.current
+            if (job == null) {
+                phoneLearning = false
+                return
+            }
+
+            val elapsed = System.currentTimeMillis() - phoneLearnStartTime
+            if (elapsed > LEARN_TIMEOUT_MS) {
+                Log.w(TAG, "Timed out learning phone number (stage=$phoneLearnStage)")
+                EventLog.log("A11y-PhoneLearn: ❌ Timeout בשלב $phoneLearnStage")
+                phoneLearning = false
+                PhoneLearnCoordinator.reportResult(PhoneLearnCoordinator.Result.TIMEOUT)
+                return
+            }
+
+            val root = rootInActiveWindow
+            if (root == null) {
+                handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                return
+            }
+
+            if (elapsed - lastPhoneLearnDumpTime > 2000L) {
+                lastPhoneLearnDumpTime = elapsed
+                val texts = mutableListOf<String>()
+                collectTexts(root, texts, maxCount = 15)
+                EventLog.log("A11y-PhoneLearn: 🔍 [שלב $phoneLearnStage, +${elapsed / 1000}s] טקסטים: ${texts.joinToString(" | ")}")
+            }
+
+            when (phoneLearnStage) {
+                0 -> {
+                    val header = findClickableByText(root, listOf(job.target))
+                    if (header != null) {
+                        Log.i(TAG, "Found contact header - clicking to open Contact Info")
+                        EventLog.log("A11y-PhoneLearn: נמצאה כותרת איש הקשר, לוחץ לפתיחת פרטי איש קשר")
+                        header.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        phoneLearnStage = 1
+                    }
+                    handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                }
+                1 -> {
+                    val texts = mutableListOf<String>()
+                    collectTexts(root, texts, maxCount = 40)
+                    // Phone-shaped: starts with + and has enough digits -
+                    // matches the format WhatsApp itself displays
+                    // (confirmed via observed titles like
+                    // "+972 54-648-9005").
+                    val phonePattern = Regex("""\+\d{1,4}[\d\s\-]{6,}""")
+                    val phoneText = texts.firstOrNull { phonePattern.containsMatchIn(it) }
+                    if (phoneText != null) {
+                        val digitsOnly = phonePattern.find(phoneText)!!.value.replace(Regex("[^+0-9]"), "")
+                        Log.i(TAG, "Found phone-shaped text: $phoneText -> $digitsOnly")
+                        EventLog.log("A11y-PhoneLearn: ✅ מספר נמצא: '$phoneText' -> $digitsOnly")
+                        phoneLearning = false
+                        PhoneLearnCoordinator.reportResult(PhoneLearnCoordinator.Result.SUCCESS, digitsOnly)
                     } else {
                         handler.postDelayed(this, SEARCH_INTERVAL_MS)
                     }

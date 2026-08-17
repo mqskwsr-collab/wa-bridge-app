@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 39
-        versionName = "0.39-fix39-invite-label-match"
+        versionCode = 40
+        versionName = "0.40-fix40-experimental-phone-learn"
     }
 
     buildTypes {

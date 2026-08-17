@@ -79,9 +79,9 @@ object GroupLinkLearner {
         }
         prefs.edit().putLong(key(target), now).apply()
 
-        if (LearnCoordinator.hasPendingLearn()) {
-            Log.d(TAG, "Skipping learn for '$target' - another learn already in progress")
-            EventLog.log("Learn: ⏭️ מדלג על למידת קישור עבור '$target' - תהליך למידה אחר כבר רץ כרגע")
+        if (LearnCoordinator.hasPendingLearn() || PhoneLearnCoordinator.hasPendingLearn() || SendCoordinator.hasPendingJob()) {
+            Log.d(TAG, "Skipping learn for '$target' - another flow already in progress")
+            EventLog.log("Learn: ⏭️ מדלג על למידת קישור עבור '$target' - תהליך אחר כבר רץ כרגע")
             return
         }
 
