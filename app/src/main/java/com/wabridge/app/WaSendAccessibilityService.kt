@@ -40,6 +40,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         private const val SEARCH_INTERVAL_MS = 400L
         private const val MAX_TAP_ATTEMPTS = 8
         private const val LEARN_TIMEOUT_MS = 18000L
+        private val MEMBERS_COUNT_REGEX = Regex("""\d+\s*(חברים|חברות|משתתפים|members|participants)""", RegexOption.IGNORE_CASE)
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -60,6 +61,7 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var learnStage = 0 // 0=find/click group header, 1=find/click "Invite via link", 2=read link text
     private var lastLearnDumpTime = 0L
     private var lastLearnScrollTime = 0L
+    private var triedMembersRowClick = false
 
     // --- Phone-number learning state (separate from both flows above) ---
     private var phoneLearning = false
@@ -90,6 +92,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             learnStage = 0
             lastLearnDumpTime = 0L
             lastLearnScrollTime = 0L
+            triedMembersRowClick = false
             handler.post(learnRunnable)
         }
 
@@ -405,21 +408,44 @@ class WaSendAccessibilityService : AccessibilityService() {
                         EventLog.log("A11y-Learn: נמצא \"הזמנה\", לוחץ")
                         inviteBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                         learnStage = 2
+                    } else if (!triedMembersRowClick) {
+                        // Not found on the current Group Info screen. FIX
+                        // (confirmed via logs for 'משפוחה'): a plain
+                        // ACTION_SCROLL_FORWARD on this long settings page
+                        // scrolls by a full "page" - for a 5-member group
+                        // that one jump lands straight in the middle of the
+                        // member list, skipping clean over the "Invite via
+                        // link" row (which sits just above the member list,
+                        // right after "Add participant"). Confirmed in logs:
+                        // the dump right after the very first scroll already
+                        // showed 4 members, with "הזמנה" never having
+                        // appeared in any dump in between.
+                        //
+                        // Instead of trying to calibrate scroll distance,
+                        // tap the "X members"/"X חברים" row, which opens
+                        // WhatsApp's dedicated Participants screen - there,
+                        // "Invite via link" sits right near the top
+                        // (immediately below "Add participant"), regardless
+                        // of member count, so it's reliably on-screen
+                        // without any scrolling at all. Only try this once
+                        // per learn attempt; if it doesn't pan out, fall
+                        // back to the old blind-scroll behavior below.
+                        triedMembersRowClick = true
+                        val membersRow = findClickableMatchingRegex(root, MEMBERS_COUNT_REGEX)
+                        if (membersRow != null) {
+                            Log.i(TAG, "Clicking members-count row to open Participants screen")
+                            EventLog.log("A11y-Learn: \"הזמנה\" לא נמצא, לוחץ על מספר החברים כדי לפתוח את מסך המשתתפים")
+                            membersRow.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        }
                     } else {
-                        // Not found anywhere in the current tree. Group Info
-                        // is a scrollable settings list (RecyclerView) - once
-                        // the group has enough members/rows, "Invite via
-                        // link" sits below the fold and off-screen rows
-                        // simply aren't attached to the accessibility tree
-                        // at all (not just hidden), so no amount of extra
-                        // waiting will ever surface it. Scroll down (throttled
-                        // so we don't spam scroll events every 400ms and
-                        // overshoot) and keep searching after each scroll.
+                        // Fallback: blind scroll of the current screen,
+                        // throttled so we don't spam scroll events every
+                        // 400ms and overshoot further than necessary.
                         if (elapsed - lastLearnScrollTime > 1200L) {
                             lastLearnScrollTime = elapsed
                             val scrollable = findScrollableNode(root)
                             if (scrollable != null) {
-                                Log.i(TAG, "'Invite' option not visible yet - scrolling Group Info down")
+                                Log.i(TAG, "'Invite' option not visible yet - scrolling down")
                                 EventLog.log("A11y-Learn: \"הזמנה\" לא נמצא במסך הנוכחי, גולל למטה")
                                 scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
                             }
@@ -530,6 +556,30 @@ class WaSendAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = findScrollableNode(child)
+            if (found != null) return found
+        }
+        return null
+    }
+
+    /**
+     * Finds a clickable node whose text or content-description matches the
+     * given regex anywhere in the string (e.g. "5 חברים" / "5 members") -
+     * used to jump straight to WhatsApp's dedicated Participants screen,
+     * where "Invite via link" reliably sits near the top regardless of
+     * member count.
+     */
+    private fun findClickableMatchingRegex(node: AccessibilityNodeInfo, regex: Regex): AccessibilityNodeInfo? {
+        val text = node.text?.toString() ?: node.contentDescription?.toString()
+        if (text != null && regex.containsMatchIn(text)) {
+            var n: AccessibilityNodeInfo? = node
+            while (n != null) {
+                if (n.isClickable) return n
+                n = n.parent
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findClickableMatchingRegex(child, regex)
             if (found != null) return found
         }
         return null
