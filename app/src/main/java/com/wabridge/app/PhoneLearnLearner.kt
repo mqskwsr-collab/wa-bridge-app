@@ -3,6 +3,7 @@ package com.wabridge.app
 import android.app.PendingIntent
 import android.content.Context
 import android.util.Log
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -27,7 +28,12 @@ object PhoneLearnLearner {
     private const val TAG = "WaBridgePhoneLearn"
     private const val PREFS_NAME = "wa_bridge_learned_phones"
     private const val LEARN_WAIT_TIMEOUT_MS = 20000L
-    private const val RETRY_COOLDOWN_MS = 30 * 60 * 1000L // 30 minutes
+    // FIX (19.8.2026): shortened from 30 min to match GroupLinkLearner -
+    // doLearn() now checks Targets in real time first (see
+    // checkTargetAlreadyKnown), so this cooldown is just a light guard
+    // against re-opening WhatsApp on every message in a fast burst, not
+    // the only thing standing between a resolved blocker and a retry.
+    private const val RETRY_COOLDOWN_MS = 3 * 60 * 1000L // 3 minutes
 
     // FIX44: this used to be called directly from
     // WaNotificationListener.onNotificationPosted() and blocks on a
@@ -60,6 +66,18 @@ object PhoneLearnLearner {
 
     private fun doLearn(context: Context, target: String, contentIntent: PendingIntent, webAppUrl: String) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+        if (prefs.getBoolean(knownKey(target), false)) {
+            Log.d(TAG, "Skipping phone-learn for '$target' - already known to have a phone (permanent)")
+            return
+        }
+
+        if (checkTargetAlreadyKnown(webAppUrl, target)) {
+            prefs.edit().putBoolean(knownKey(target), true).apply()
+            EventLog.log("PhoneLearn: ✅ ל-'$target' כבר יש מספר בטבלת Targets - לא נדרשת למידה")
+            return
+        }
+
         val lastAttempt = prefs.getLong(key(target), 0L)
         val now = System.currentTimeMillis()
         if (now - lastAttempt < RETRY_COOLDOWN_MS) {
@@ -103,8 +121,31 @@ object PhoneLearnLearner {
         if (result == PhoneLearnCoordinator.Result.SUCCESS && learnedPhone != null) {
             EventLog.log("PhoneLearn: ✅ מספר נלמד עבור '$target': $learnedPhone")
             reportLearnedPhone(webAppUrl, target, learnedPhone!!)
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putBoolean(knownKey(target), true).apply()
         } else {
             EventLog.log("PhoneLearn: ❌ לא הצלחתי ללמוד מספר עבור '$target' (result=$result)")
+        }
+    }
+
+    /** See GroupLinkLearner.checkTargetAlreadyKnown - identical purpose, applied to private contacts. */
+    private fun checkTargetAlreadyKnown(webAppUrl: String, target: String): Boolean {
+        return try {
+            val url = "$webAppUrl?action=lookupTarget&target=" + URLEncoder.encode(target, "UTF-8")
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10000
+                readTimeout = 10000
+            }
+            val code = conn.responseCode
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            conn.disconnect()
+            if (code != 200) return false
+            val json = JSONObject(body)
+            json.optBoolean("found", false) && json.optString("phoneOrLink", "").isNotBlank()
+        } catch (e: Exception) {
+            Log.e(TAG, "lookupTarget failed for '$target' (assuming not known yet, will attempt learn)", e)
+            false
         }
     }
 
@@ -127,4 +168,5 @@ object PhoneLearnLearner {
     }
 
     private fun key(target: String) = "attempt_$target"
+    private fun knownKey(target: String) = "known_$target"
 }
