@@ -7,6 +7,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -28,9 +29,36 @@ object PhoneLearnLearner {
     private const val LEARN_WAIT_TIMEOUT_MS = 20000L
     private const val RETRY_COOLDOWN_MS = 30 * 60 * 1000L // 30 minutes
 
+    // FIX44: this used to be called directly from
+    // WaNotificationListener.onNotificationPosted() and blocks on a
+    // CountDownLatch for up to LEARN_WAIT_TIMEOUT_MS (20 seconds) -
+    // exactly the bug already fixed in GroupLinkLearner under FIX37,
+    // which this class's own doc comment claims to mirror but never
+    // actually received the executor wrapping for. Calling it inline
+    // froze the listener's callback thread for up to 20s on every new
+    // private contact, during which any other notification Android
+    // tried to deliver could be silently dropped/coalesced - this is
+    // the confirmed cause of Yoni's group message never even reaching
+    // the on-screen log. The public entry point now returns
+    // immediately; the actual blocking work happens on this dedicated
+    // background thread instead.
+    private val learnExecutor = Executors.newSingleThreadExecutor()
+
     fun maybeLearnPhone(context: Context, target: String, contentIntent: PendingIntent?, webAppUrl: String?) {
         if (contentIntent == null || webAppUrl.isNullOrBlank()) return
+        // Fire-and-forget from the caller's perspective - the caller
+        // (WaNotificationListener.onNotificationPosted) must never block.
+        learnExecutor.execute {
+            try {
+                doLearn(context.applicationContext, target, contentIntent, webAppUrl)
+            } catch (e: Exception) {
+                Log.e(TAG, "Unexpected error during phone learn (non-fatal)", e)
+                EventLog.log("PhoneLearn: ❌ שגיאה בלתי צפויה בתהליך למידת מספר: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+    }
 
+    private fun doLearn(context: Context, target: String, contentIntent: PendingIntent, webAppUrl: String) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val lastAttempt = prefs.getLong(key(target), 0L)
         val now = System.currentTimeMillis()
