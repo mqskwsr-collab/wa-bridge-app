@@ -73,25 +73,18 @@ object GroupLinkLearner {
     private fun doLearn(context: Context, target: String, contentIntent: PendingIntent, webAppUrl: String) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        // Fast local check, no network: once we've confirmed (below, or
-        // via a past successful learn) that Targets already has this
-        // target covered, never bother again - permanently, not just
-        // for a cooldown window.
-        if (prefs.getBoolean(knownKey(target), false)) {
-            Log.d(TAG, "Skipping learn for '$target' - already known to have a phone/link (permanent)")
-            return
-        }
-
-        // Real-time check against the sheet itself (the actual source of
-        // truth), not just our local guess: someone may have added the
-        // link/phone manually, or a previous learn attempt may have
-        // succeeded through another path. If it's there, mark it known
-        // locally so future messages skip instantly with no network
-        // call at all, and skip this attempt with zero waiting - no
-        // reason to fire the contentIntent or touch WhatsApp's UI.
+        // FIX (19.8.2026): there used to be a permanent local "known"
+        // flag here that, once set, skipped the sheet check forever -
+        // but that meant if a target's row was later deleted from
+        // Targets (e.g. to clean up a messy manual entry), this device
+        // would keep believing it's still known and never notice or
+        // re-attempt learning. Removed - Code.gs's Targets sheet is now
+        // checked fresh on every single incoming message (a light GET,
+        // not the actual WhatsApp-UI-touching learn flow), so a manual
+        // deletion is picked up on the very next message, not stuck
+        // forever. Only the real learn attempt below stays gated by the
+        // short cooldown.
         if (checkTargetAlreadyKnown(webAppUrl, target)) {
-            prefs.edit().putBoolean(knownKey(target), true).apply()
-            EventLog.log("Learn: ✅ ל-'$target' כבר יש קישור/מספר בטבלת Targets - לא נדרשת למידה")
             return
         }
 
@@ -148,13 +141,10 @@ object GroupLinkLearner {
         if (result == LearnCoordinator.Result.SUCCESS && learnedLink != null) {
             EventLog.log("Learn: ✅ קישור נלמד עבור '$target': $learnedLink")
             reportLearnedLink(webAppUrl, target, learnedLink!!)
-            // Mark permanently known locally too, so the very next
-            // message from this group skips instantly with no network
-            // round-trip at all, instead of waiting for the next
-            // checkTargetAlreadyKnown() call to confirm what we already
-            // just learned ourselves.
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit().putBoolean(knownKey(target), true).apply()
+            // No local "permanently known" flag anymore (see FIX note
+            // above doLearn) - the next message will simply confirm this
+            // via checkTargetAlreadyKnown() against the sheet, which by
+            // then reflects what reportLearnedLink() just saved.
         } else {
             EventLog.log("Learn: ❌ לא הצלחתי ללמוד קישור עבור '$target' (result=$result)")
         }
@@ -212,5 +202,4 @@ object GroupLinkLearner {
     }
 
     private fun key(target: String) = "attempt_$target"
-    private fun knownKey(target: String) = "known_$target"
 }
