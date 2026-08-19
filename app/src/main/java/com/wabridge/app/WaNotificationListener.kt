@@ -120,9 +120,27 @@ class WaNotificationListener : NotificationListenerService() {
         // Utils.canonicalTarget's doc comment for the real incident this
         // fixes). Previously isGroup was computed AFTER the reply-action
         // capture below, which used the old (uncorrected) target.
-        val isGroup = GroupDetector.isGroupConversation(sbn)
+        val rawIsGroup = GroupDetector.isGroupConversation(sbn)
+
+        // FIX42 (bug 2): when Android gives us no flag at all (null) we no
+        // longer fall through to the "private" path blindly - if this chat
+        // name was ALREADY confirmed as a group by Android at least once,
+        // the local cache answers authoritatively. See KnownGroupsCache.
+        var isGroup = rawIsGroup
+        if (rawIsGroup == null) {
+            val cleanTitle = Utils.stripUnreadCountSuffix(Utils.stripBidiMarks(title).trim())
+            val cached = KnownGroupsCache.resolveGroupName(this, cleanTitle)
+            if (cached != null) {
+                isGroup = true
+                EventLog.log("Listener: 🧠 הדגל חסר - אך '$cached' מוכרת כקבוצה מהמטמון, מסווג כקבוצה")
+            } else {
+                EventLog.log("Listener: ⚠️ הדגל isGroupConversation חסר ואין התאמה במטמון עבור '$cleanTitle'")
+            }
+        }
+
         val canonicalTarget = Utils.canonicalTarget(title, isGroup)
-        EventLog.log("Listener: 🔍 isGroupConversation=$isGroup עבור '$canonicalTarget'")
+        if (isGroup == true) KnownGroupsCache.remember(this, canonicalTarget)
+        EventLog.log("Listener: 🔍 isGroupConversation=$rawIsGroup (בשימוש: $isGroup) עבור '$canonicalTarget'")
 
         // Capture the notification's own "Reply" action (RemoteInput),
         // if present - this lets PollingService send the eventual email
@@ -202,9 +220,17 @@ class WaNotificationListener : NotificationListenerService() {
             null
         }
 
-        Log.i(TAG, "WhatsApp notification: title='$title' text='$text' phone=$phone isGroup=$isGroup -> forwarding")
+        // FIX42 (bug 1): forward the title WITHOUT Android's unread-count
+        // suffix, otherwise Code.gs computes target="Sionov Club (2 הודעות)"
+        // server-side and no sheet row / screen search can ever match it.
+        val outgoingTitle = Utils.stripUnreadCountSuffix(Utils.stripBidiMarks(title).trim())
+        if (outgoingTitle != title) {
+            EventLog.log("Listener: ✂️ הוסרה סיומת מונה מהכותרת: '$title' -> '$outgoingTitle'")
+        }
+
+        Log.i(TAG, "WhatsApp notification: title='$outgoingTitle' text='$text' phone=$phone isGroup=$isGroup -> forwarding")
         EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
-        executor.execute { postToAppsScript(webAppUrl, title, text, phone, isGroup) }
+        executor.execute { postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup) }
     }
 
     
