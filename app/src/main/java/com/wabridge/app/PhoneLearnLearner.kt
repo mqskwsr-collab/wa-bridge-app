@@ -67,14 +67,11 @@ object PhoneLearnLearner {
     private fun doLearn(context: Context, target: String, contentIntent: PendingIntent, webAppUrl: String) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        if (prefs.getBoolean(knownKey(target), false)) {
-            Log.d(TAG, "Skipping phone-learn for '$target' - already known to have a phone (permanent)")
-            return
-        }
-
+        // FIX (19.8.2026): see GroupLinkLearner's identical fix note -
+        // no more permanent local "known" flag, so a manually deleted
+        // Targets row is noticed on the very next message instead of
+        // staying silently stuck as "known" on this device forever.
         if (checkTargetAlreadyKnown(webAppUrl, target)) {
-            prefs.edit().putBoolean(knownKey(target), true).apply()
-            EventLog.log("PhoneLearn: ✅ ל-'$target' כבר יש מספר בטבלת Targets - לא נדרשת למידה")
             return
         }
 
@@ -121,8 +118,6 @@ object PhoneLearnLearner {
         if (result == PhoneLearnCoordinator.Result.SUCCESS && learnedPhone != null) {
             EventLog.log("PhoneLearn: ✅ מספר נלמד עבור '$target': $learnedPhone")
             reportLearnedPhone(webAppUrl, target, learnedPhone!!)
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit().putBoolean(knownKey(target), true).apply()
         } else {
             EventLog.log("PhoneLearn: ❌ לא הצלחתי ללמוד מספר עבור '$target' (result=$result)")
         }
@@ -168,5 +163,4 @@ object PhoneLearnLearner {
     }
 
     private fun key(target: String) = "attempt_$target"
-    private fun knownKey(target: String) = "known_$target"
 }
