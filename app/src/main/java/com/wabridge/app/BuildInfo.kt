@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX40-experimental-phone-learn-2026-08-14"
+    const val BUILD_TAG = "FIX42-title-count-strip-and-group-cache-2026-08-19"
 }
