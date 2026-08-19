@@ -98,15 +98,7 @@ class WaNotificationListener : NotificationListenerService() {
             return
         }
 
-        val dedupeKey = "$title|$text"
         val now = System.currentTimeMillis()
-        if (dedupeKey == lastKey && (now - lastTimestamp) < DEDUPE_WINDOW_MS) {
-            Log.d(TAG, "Ignoring duplicate notification within dedupe window: $dedupeKey")
-            EventLog.log("Listener: ⏭️ מתעלם - כפילות תוך ${DEDUPE_WINDOW_MS}ms")
-            return
-        }
-        lastKey = dedupeKey
-        lastTimestamp = now
 
         // Detect group vs private using Android's own MessagingStyle flag
         // instead of a manually-maintained group-name whitelist - this
@@ -141,6 +133,27 @@ class WaNotificationListener : NotificationListenerService() {
         val canonicalTarget = Utils.canonicalTarget(title, isGroup)
         if (isGroup == true) KnownGroupsCache.remember(this, canonicalTarget)
         EventLog.log("Listener: 🔍 isGroupConversation=$rawIsGroup (בשימוש: $isGroup) עבור '$canonicalTarget'")
+
+        // FIX43: WhatsApp commonly posts the same group message twice: once
+        // as title="Group"/text="Sender: message" and once as
+        // title="Group: Sender"/text="message". De-duping the raw title and
+        // text could never match those two shapes, so both reached Code.gs.
+        // Compare the canonical group and message instead.
+        val canonicalMessage = if (isGroup == true) {
+            val cleanText = Utils.stripBidiMarks(text).trim()
+            val senderSeparator = cleanText.indexOf(": ")
+            if (senderSeparator > 0) cleanText.substring(senderSeparator + 2).trim() else cleanText
+        } else {
+            Utils.stripBidiMarks(text).trim()
+        }
+        val dedupeKey = "$canonicalTarget|$canonicalMessage"
+        if (dedupeKey == lastKey && (now - lastTimestamp) < DEDUPE_WINDOW_MS) {
+            Log.d(TAG, "Ignoring canonical duplicate notification within dedupe window: $dedupeKey")
+            EventLog.log("Listener: ⏭️ מתעלם - אותה הודעה כבר התקבלה בפורמט התראה נוסף")
+            return
+        }
+        lastKey = dedupeKey
+        lastTimestamp = now
 
         // Capture the notification's own "Reply" action (RemoteInput),
         // if present - this lets PollingService send the eventual email

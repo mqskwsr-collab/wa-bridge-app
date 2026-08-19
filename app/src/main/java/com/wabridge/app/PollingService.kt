@@ -15,6 +15,7 @@ import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.util.Log
 import org.json.JSONObject
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.CountDownLatch
@@ -262,12 +263,21 @@ class PollingService : Service() {
         val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 15000
-            readTimeout = 15000
+            // Apps Script cold starts occasionally exceed 15 seconds.
+            readTimeout = 30000
         }
         val code = conn.responseCode
         val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
             ?.bufferedReader()?.use { it.readText() } ?: ""
         conn.disconnect()
+        if (code !in 200..299) {
+            throw IOException("Apps Script החזיר HTTP $code")
+        }
+        if (body.trimStart().startsWith("<!DOCTYPE", ignoreCase = true) ||
+            body.trimStart().startsWith("<html", ignoreCase = true)
+        ) {
+            throw IOException("Apps Script החזיר דף HTML במקום JSON (תקלה זמנית של Google)")
+        }
         return body
     }
 
