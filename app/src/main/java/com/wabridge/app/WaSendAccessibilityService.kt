@@ -535,7 +535,15 @@ class WaSendAccessibilityService : AccessibilityService() {
     }
 
     private fun findTextMatch(node: AccessibilityNodeInfo, candidates: List<String>): AccessibilityNodeInfo? {
-        val text = node.text?.toString() ?: node.contentDescription?.toString()
+        // FIX45: strip Unicode bidi control chars before comparing - Android
+        // wraps raw phone-number titles (unsaved contacts) in RLM/LRE/PDF
+        // marks for RTL display, e.g. '\u200f\u202a+972 50-914-4971\u202c\u200f'.
+        // Without stripping, this never matched a clean target like
+        // '+972 50-914-4971', so phoneLearnRunnable's stage 0 (find/click the
+        // contact header) always timed out for new private contacts - group
+        // names aren't bidi-wrapped this way, so learnRunnable's identical
+        // stage 0 never showed the bug.
+        val text = node.text?.toString()?.let { stripBidiMarks(it) } ?: node.contentDescription?.toString()?.let { stripBidiMarks(it) }
         if (text != null) {
             for (candidate in candidates) {
                 if (text.equals(candidate, ignoreCase = true) || text.startsWith(candidate, ignoreCase = true)) {
