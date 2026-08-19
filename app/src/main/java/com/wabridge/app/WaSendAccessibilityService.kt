@@ -39,7 +39,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         private const val SEARCH_TIMEOUT_MS = 15000L
         private const val SEARCH_INTERVAL_MS = 400L
         private const val MAX_TAP_ATTEMPTS = 8
-        private const val LEARN_TIMEOUT_MS = 15000L
+        private const val LEARN_TIMEOUT_MS = 18000L
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -59,6 +59,7 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var learnStartTime = 0L
     private var learnStage = 0 // 0=find/click group header, 1=find/click "Invite via link", 2=read link text
     private var lastLearnDumpTime = 0L
+    private var lastLearnScrollTime = 0L
 
     // --- Phone-number learning state (separate from both flows above) ---
     private var phoneLearning = false
@@ -88,6 +89,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             learnStartTime = System.currentTimeMillis()
             learnStage = 0
             lastLearnDumpTime = 0L
+            lastLearnScrollTime = 0L
             handler.post(learnRunnable)
         }
 
@@ -403,6 +405,25 @@ class WaSendAccessibilityService : AccessibilityService() {
                         EventLog.log("A11y-Learn: נמצא \"הזמנה\", לוחץ")
                         inviteBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                         learnStage = 2
+                    } else {
+                        // Not found anywhere in the current tree. Group Info
+                        // is a scrollable settings list (RecyclerView) - once
+                        // the group has enough members/rows, "Invite via
+                        // link" sits below the fold and off-screen rows
+                        // simply aren't attached to the accessibility tree
+                        // at all (not just hidden), so no amount of extra
+                        // waiting will ever surface it. Scroll down (throttled
+                        // so we don't spam scroll events every 400ms and
+                        // overshoot) and keep searching after each scroll.
+                        if (elapsed - lastLearnScrollTime > 1200L) {
+                            lastLearnScrollTime = elapsed
+                            val scrollable = findScrollableNode(root)
+                            if (scrollable != null) {
+                                Log.i(TAG, "'Invite' option not visible yet - scrolling Group Info down")
+                                EventLog.log("A11y-Learn: \"הזמנה\" לא נמצא במסך הנוכחי, גולל למטה")
+                                scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                            }
+                        }
                     }
                     handler.postDelayed(this, SEARCH_INTERVAL_MS)
                 }
@@ -496,6 +517,22 @@ class WaSendAccessibilityService : AccessibilityService() {
                 }
             }
         }
+    }
+
+    /**
+     * Finds the first scrollable node anywhere in the tree (e.g. the
+     * RecyclerView backing WhatsApp's Group Info screen), so learnRunnable's
+     * stage 1 can scroll it down to bring off-screen rows like "Invite via
+     * link" into the accessibility tree.
+     */
+    private fun findScrollableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (node.isScrollable) return node
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findScrollableNode(child)
+            if (found != null) return found
+        }
+        return null
     }
 
     /** Like findClickableByText but matches if the candidate is CONTAINED in the node's text (broader, last-resort). */
