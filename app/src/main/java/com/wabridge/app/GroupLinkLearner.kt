@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -27,10 +28,19 @@ object GroupLinkLearner {
     private const val TAG = "WaBridgeLearn"
     private const val PREFS_NAME = "wa_bridge_learned_groups"
     private const val LEARN_WAIT_TIMEOUT_MS = 20000L
-    // Don't retry a failed/unattempted learn on every single message from
-    // the same group - retry at most once per this cooldown, in case the
-    // first attempt failed transiently (e.g. WhatsApp screen not ready).
-    private const val RETRY_COOLDOWN_MS = 30 * 60 * 1000L // 30 minutes
+    // FIX (19.8.2026): this used to be the ONLY gate on retrying a
+    // failed learn attempt, and it was 30 minutes - meaning if the real
+    // blocker was something transient/external (e.g. the group was
+    // locked and "Invite via link" genuinely wasn't offered until the
+    // account got the right permission), every message in between was
+    // silently skipped for up to half an hour even after the blocker
+    // was resolved. Now doLearn() first asks Code.gs in real time
+    // whether Targets already has this target's phone/link (see
+    // checkTargetAlreadyKnown below) - if it does, we skip permanently
+    // with zero waiting; if it doesn't, we only need this cooldown as a
+    // light guard against re-opening the WhatsApp screen on every
+    // single message in a fast burst, so it can be much shorter now.
+    private const val RETRY_COOLDOWN_MS = 3 * 60 * 1000L // 3 minutes
 
     // Dedicated single-thread executor, separate from
     // WaNotificationListener's own posting executor. CRITICAL FIX
@@ -62,10 +72,33 @@ object GroupLinkLearner {
 
     private fun doLearn(context: Context, target: String, contentIntent: PendingIntent, webAppUrl: String) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+        // Fast local check, no network: once we've confirmed (below, or
+        // via a past successful learn) that Targets already has this
+        // target covered, never bother again - permanently, not just
+        // for a cooldown window.
+        if (prefs.getBoolean(knownKey(target), false)) {
+            Log.d(TAG, "Skipping learn for '$target' - already known to have a phone/link (permanent)")
+            return
+        }
+
+        // Real-time check against the sheet itself (the actual source of
+        // truth), not just our local guess: someone may have added the
+        // link/phone manually, or a previous learn attempt may have
+        // succeeded through another path. If it's there, mark it known
+        // locally so future messages skip instantly with no network
+        // call at all, and skip this attempt with zero waiting - no
+        // reason to fire the contentIntent or touch WhatsApp's UI.
+        if (checkTargetAlreadyKnown(webAppUrl, target)) {
+            prefs.edit().putBoolean(knownKey(target), true).apply()
+            EventLog.log("Learn: ✅ ל-'$target' כבר יש קישור/מספר בטבלת Targets - לא נדרשת למידה")
+            return
+        }
+
         val lastAttempt = prefs.getLong(key(target), 0L)
         val now = System.currentTimeMillis()
         if (now - lastAttempt < RETRY_COOLDOWN_MS) {
-            val remainingMin = (RETRY_COOLDOWN_MS - (now - lastAttempt)) / 60000L
+            val remainingSec = (RETRY_COOLDOWN_MS - (now - lastAttempt)) / 1000L
             Log.d(TAG, "Skipping learn for '$target' - attempted recently")
             // Previously silent (Log.d only, invisible without Logcat) -
             // this made it impossible to tell, from the on-screen log
@@ -74,7 +107,7 @@ object GroupLinkLearner {
             // real incident: a group message came in, isGroupConversation
             // correctly detected true, yet zero "Learn:" lines appeared
             // anywhere in the log - this line is why.
-            EventLog.log("Learn: ⏭️ מדלג על למידת קישור עבור '$target' - ניסיון קודם לפני פחות מ-30 דק' (עוד כ-${remainingMin} דק' עד ניסיון הבא)")
+            EventLog.log("Learn: ⏭️ מדלג על למידת קישור עבור '$target' - ניסיון קודם לפני פחות מ-${RETRY_COOLDOWN_MS / 60000L} דק' (עוד כ-${remainingSec} שנ' עד ניסיון הבא)")
             return
         }
         prefs.edit().putLong(key(target), now).apply()
@@ -115,11 +148,48 @@ object GroupLinkLearner {
         if (result == LearnCoordinator.Result.SUCCESS && learnedLink != null) {
             EventLog.log("Learn: ✅ קישור נלמד עבור '$target': $learnedLink")
             reportLearnedLink(webAppUrl, target, learnedLink!!)
-            // Success - don't need the cooldown anymore, but leaving the
-            // timestamp set is harmless (upsertTarget will just refresh
-            // the same value if this ever fires again).
+            // Mark permanently known locally too, so the very next
+            // message from this group skips instantly with no network
+            // round-trip at all, instead of waiting for the next
+            // checkTargetAlreadyKnown() call to confirm what we already
+            // just learned ourselves.
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putBoolean(knownKey(target), true).apply()
         } else {
             EventLog.log("Learn: ❌ לא הצלחתי ללמוד קישור עבור '$target' (result=$result)")
+        }
+    }
+
+    /**
+     * Asks Code.gs, in real time, whether the Targets sheet already has a
+     * phone/link saved for this target - the actual source of truth,
+     * covering both "we learned it successfully before" and "a human
+     * added it to the sheet manually" (e.g. right after unlocking a
+     * group's invite-link permission, as happened for 'משפוחה'). Returns
+     * false (i.e. "go ahead and try learning") on any network/parse
+     * error, since that's the safe default - worst case we just attempt
+     * the existing accessibility flow as before.
+     */
+    private fun checkTargetAlreadyKnown(webAppUrl: String, target: String): Boolean {
+        return try {
+            val url = "$webAppUrl?action=lookupTarget&target=" + URLEncoder.encode(target, "UTF-8")
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10000
+                readTimeout = 10000
+            }
+            val code = conn.responseCode
+            val body = conn.inputStream.bufferedReader().use { it.readText() }
+            conn.disconnect()
+            if (code != 200) {
+                Log.w(TAG, "lookupTarget HTTP $code for '$target' - assuming not known yet")
+                return false
+            }
+            val json = JSONObject(body)
+            json.optBoolean("found", false) && json.optString("phoneOrLink", "").isNotBlank()
+        } catch (e: Exception) {
+            Log.e(TAG, "lookupTarget failed for '$target' (assuming not known yet, will attempt learn)", e)
+            false
         }
     }
 
@@ -142,4 +212,5 @@ object GroupLinkLearner {
     }
 
     private fun key(target: String) = "attempt_$target"
+    private fun knownKey(target: String) = "known_$target"
 }
