@@ -46,11 +46,35 @@ object Utils {
      * case to ALL groups, known or brand new, and matches Code.gs's own
      * behavior so the two sides never disagree on a group's name again.
      */
+
+    /**
+     * FIX42 (bug 1): Android/WhatsApp appends an unread-message counter to
+     * the notification title when several unread messages pile up from the
+     * same chat - e.g. "Sionov Club (2 הודעות)" / "Sionov Club (2 messages)"
+     * / "Sionov Club (2)". The on-screen conversation toolbar shows only the
+     * bare chat name, so the counter made every screen search miss (real
+     * incident: "Learn: קבוצה חדשה 'Sionov Club (2 הודעות)'" followed by a
+     * Timeout at step 0), and it also made the target disagree with the one
+     * Code.gs computes server-side. Strip the trailing counter always.
+     */
+    fun stripUnreadCountSuffix(s: String): String {
+        var out = s.trim()
+        // Repeat: some ROMs stack the counter twice on rapid updates.
+        while (true) {
+            val stripped = out.replace(
+                Regex("""\s*\(\s*\d+\s*(הודעות|הודעה|messages?|new messages?)?\s*\)\s*$""", RegexOption.IGNORE_CASE),
+                ""
+            ).trim()
+            if (stripped == out || stripped.isEmpty()) return out
+            out = stripped
+        }
+    }
+
     fun canonicalTarget(rawTitle: String, isGroup: Boolean? = null): String {
-        val title = stripBidiMarks(rawTitle).trim()
+        val title = stripUnreadCountSuffix(stripBidiMarks(rawTitle).trim())
         if (isGroup == true) {
             val sepIndex = title.indexOf(": ")
-            if (sepIndex > 0) return title.substring(0, sepIndex).trim()
+            if (sepIndex > 0) return stripUnreadCountSuffix(title.substring(0, sepIndex).trim())
             return title
         }
         val matchedGroup = AppConfig.KNOWN_GROUPS.find { title == it || title.startsWith("$it:") }
