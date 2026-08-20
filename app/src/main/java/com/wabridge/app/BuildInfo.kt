@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX43-canonical-notification-dedupe-2026-08-19"
+    const val BUILD_TAG = "FIX44-media-download-tap-diagnostics-2026-08-21"
 }

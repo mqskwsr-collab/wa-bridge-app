@@ -614,6 +614,29 @@ class WaSendAccessibilityService : AccessibilityService() {
                     val bubble = findBottommostImageNode(root)
                     if (bubble != null) {
                         Log.i(TAG, "Found media bubble - tapping to force download")
+                        // DIAGNOSTIC (21.8.2026): log exactly WHAT is
+                        // about to be tapped - className/text/content-
+                        // description/resource-id/bounds - so we can
+                        // directly confirm or rule out from the log
+                        // whether this is really the photo bubble or
+                        // (suspected) a bottom-toolbar icon like camera/
+                        // attach, which also sit in the accessibility
+                        // tree as clickable ImageView-class nodes with a
+                        // large bounds.bottom.
+                        val bRect = Rect()
+                        bubble.getBoundsInScreen(bRect)
+                        EventLog.log(
+                            "A11y-MediaDownload: 🎯 יעד הלחיצה - class=${bubble.className} " +
+                                "text='${bubble.text}' desc='${bubble.contentDescription}' " +
+                                "id=${bubble.viewIdResourceName} bounds=$bRect"
+                        )
+                        // DIAGNOSTIC (21.8.2026): also log the other
+                        // top candidates that were NOT picked (by
+                        // bounds.bottom) - if the toolbar-icon theory is
+                        // right, we should see camera/attach/mic-like
+                        // nodes clustered at the very bottom of the
+                        // screen, likely ABOVE the actual photo bubble.
+                        logImageNodeCandidates(root)
                         EventLog.log("A11y-MediaDownload: נמצאה בועת מדיה, לוחץ לפתיחה (הכרחת הורדה)")
                         bubble.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                         mediaDownloadStage = 1
@@ -672,6 +695,51 @@ class WaSendAccessibilityService : AccessibilityService() {
 
         visit(root)
         return best
+    }
+
+    /**
+     * DIAGNOSTIC (21.8.2026): companion to findBottommostImageNode -
+     * walks the same tree but collects EVERY clickable ImageView-class
+     * candidate (not just the winner) and logs the 5 with the largest
+     * bounds.bottom, each with its class/text/content-description/
+     * resource-id/bounds. Purely for diagnosis; doesn't affect which
+     * node actually gets tapped.
+     */
+    private fun logImageNodeCandidates(root: AccessibilityNodeInfo) {
+        try {
+            data class Candidate(val node: AccessibilityNodeInfo, val rect: Rect)
+            val found = mutableListOf<Candidate>()
+
+            fun visit(node: AccessibilityNodeInfo) {
+                val cls = node.className?.toString() ?: ""
+                if (cls.contains("ImageView", ignoreCase = true)) {
+                    var clickable: AccessibilityNodeInfo? = node
+                    while (clickable != null && !clickable.isClickable) clickable = clickable.parent
+                    if (clickable != null) {
+                        val r = Rect()
+                        clickable.getBoundsInScreen(r)
+                        found.add(Candidate(clickable, r))
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    val child = node.getChild(i) ?: continue
+                    visit(child)
+                }
+            }
+            visit(root)
+
+            val top = found.sortedByDescending { it.rect.bottom }.take(5)
+            EventLog.log("A11y-MediaDownload: 🔎 אבחון - ${found.size} מועמדי ImageView לחיצים, 5 התחתונים ביותר:")
+            top.forEach { c ->
+                EventLog.log(
+                    "A11y-MediaDownload: 🔎 אבחון -   class=${c.node.className} " +
+                        "text='${c.node.text}' desc='${c.node.contentDescription}' " +
+                        "id=${c.node.viewIdResourceName} bounds=${c.rect}"
+                )
+            }
+        } catch (e: Exception) {
+            EventLog.log("A11y-MediaDownload: 🔎 אבחון מועמדים נכשל: ${e.javaClass.simpleName}: ${e.message}")
+        }
     }
 
     /**

@@ -81,17 +81,28 @@ class PollingService : Service() {
 
     private fun pollLoop() {
         var cycleCount = 0
+        var lastLoggedListenerConnected: Boolean? = null
         while (running.get()) {
             try {
                 cycleCount++
-                // Log a heartbeat EVERY cycle showing whether the
-                // notification listener is actually connected right now
-                // (not inferred retroactively from a missing message) -
-                // and nudge a rebind every cycle too (cheap, and this was
-                // previously only every ~3rd cycle which may have left
-                // too wide a gap during a real disconnect).
+                // FIX (21.8.2026): still checking + rebinding EVERY
+                // cycle as before (that part is cheap and matters for
+                // reliability), but no longer LOGGING every single
+                // cycle - at one line per 45s that was ~80 lines/hour
+                // of pure noise, which combined with the old 80-entry
+                // buffer cap was the actual reason only ~1h of history
+                // was ever visible (see EventLog.kt). Now only logs
+                // when the state actually CHANGES (so a real
+                // disconnect is still caught immediately), plus a
+                // once-every-10-cycles (~7.5min) "still alive" ping so
+                // it's still obvious the service didn't just die
+                // silently.
                 val listenerConnected = WaNotificationListener.isConnected
-                EventLog.log("Poll: 💓 מצב מאזין=${if (listenerConnected) "מחובר ✅" else "מנותק ❌"}")
+                val stateChanged = listenerConnected != lastLoggedListenerConnected
+                if (stateChanged || cycleCount % 10 == 0) {
+                    EventLog.log("Poll: 💓 מצב מאזין=${if (listenerConnected) "מחובר ✅" else "מנותק ❌"}" + if (stateChanged && lastLoggedListenerConnected != null) " (השתנה!)" else "")
+                    lastLoggedListenerConnected = listenerConnected
+                }
                 try {
                     NotificationListenerService.requestRebind(
                         ComponentName(this, WaNotificationListener::class.java)
