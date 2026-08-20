@@ -48,6 +48,17 @@ class WaSendAccessibilityService : AccessibilityService() {
         // widen if EventLog shows the file still isn't there afterward.
         private const val MEDIA_DOWNLOAD_SETTLE_MS = 3000L
         private val MEMBERS_COUNT_REGEX = Regex("""\d+\s*(חברים|חברות|משתתפים|members|participants)""", RegexOption.IGNORE_CASE)
+        // Matches WhatsApp's "jump to newest message" floating button
+        // across the Hebrew/English variants observed in practice.
+        private val JUMP_TO_LAST_MESSAGE_REGEX = Regex("""(עבור אל ההודעה האחרונה|עבור להודעה האחרונה|scroll to (the )?last message|go to last message)""", RegexOption.IGNORE_CASE)
+        // Chrome/overlay icons that are NOT message bubbles but can look
+        // like one to a bare "clickable ImageView" search (confirmed via
+        // on-device logs: the "jump to last message" FAB and the
+        // overflow "More options" menu both matched before this
+        // denylist existed). Belt-and-suspenders alongside stage -1's
+        // scroll-to-bottom fix, in case that doesn't fully resolve it on
+        // some device/WhatsApp version.
+        private val NON_MEDIA_ICON_DESC_REGEX = Regex("""(עבור אל ההודעה האחרונה|עבור להודעה האחרונה|scroll to (the )?last message|go to last message|more options|options menu|camera|attach|voice message|emoji|search|send)""", RegexOption.IGNORE_CASE)
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -79,9 +90,10 @@ class WaSendAccessibilityService : AccessibilityService() {
     // --- Media forced-download state (separate from all flows above) ---
     private var downloadingMedia = false
     private var mediaDownloadStartTime = 0L
-    private var mediaDownloadStage = 0 // 0=find/tap most recent media bubble, 1=settle+back out
+    private var mediaDownloadStage = 0 // -1=scroll to bottom if needed, 0=find/tap most recent media bubble, 1=settle+back out
     private var mediaTapTime = 0L
     private var lastMediaDownloadDumpTime = 0L
+    private var scrolledToLatestMessage = false
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -125,7 +137,22 @@ class WaSendAccessibilityService : AccessibilityService() {
             EventLog.log("A11y-MediaDownload: חלון וואטסאפ השתנה, מתחיל תהליך הכרחת הורדה")
             downloadingMedia = true
             mediaDownloadStartTime = System.currentTimeMillis()
-            mediaDownloadStage = 0
+            // FIX (21.8.2026): start at stage -1, not 0. Log evidence
+            // (21.8.2026 01:13 run) showed the chat can open WITHOUT
+            // being scrolled to the newest message - WhatsApp then shows
+            // a floating "עבור אל ההודעה האחרונה" / "Go to last
+            // message" jump button, which is itself a clickable
+            // FrameLayout containing an ImageView icon. Since it sits
+            // low on screen (and the real photo bubble is off-screen,
+            // not even in the tree yet), the old bottommost-ImageView
+            // search grabbed the jump button instead of the photo -
+            // explaining exactly why the chat opened, something got
+            // tapped, but no file ever appeared. Stage -1 taps that
+            // jump button first (if present) and waits for the list to
+            // actually settle at the bottom before stage 0 searches for
+            // the real bubble.
+            mediaDownloadStage = -1
+            scrolledToLatestMessage = false
             lastMediaDownloadDumpTime = 0L
             handler.post(mediaDownloadRunnable)
         }
@@ -605,6 +632,27 @@ class WaSendAccessibilityService : AccessibilityService() {
             }
 
             when (mediaDownloadStage) {
+                -1 -> {
+                    // Look for WhatsApp's "jump to last message" floating
+                    // button (Hebrew/English variants seen in practice).
+                    // If present, the newest message isn't rendered yet -
+                    // tap it, give the list a moment to actually scroll
+                    // and render the bottom, then move on to stage 0.
+                    // If absent, we're already at the bottom - proceed
+                    // immediately, no wasted wait.
+                    val jumpButton = findClickableMatchingRegex(root, JUMP_TO_LAST_MESSAGE_REGEX)
+                    if (jumpButton != null && !scrolledToLatestMessage) {
+                        EventLog.log("A11y-MediaDownload: 🔽 נמצא כפתור \"עבור להודעה האחרונה\" - הצ'אט לא היה גלול לתחתית, לוחץ")
+                        jumpButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        scrolledToLatestMessage = true
+                        mediaDownloadStage = 0
+                        handler.postDelayed(this, 900L)
+                    } else {
+                        scrolledToLatestMessage = true
+                        mediaDownloadStage = 0
+                        handler.post(this)
+                    }
+                }
                 0 -> {
                     if (elapsed - lastMediaDownloadDumpTime > 2000L) {
                         lastMediaDownloadDumpTime = elapsed
@@ -680,6 +728,20 @@ class WaSendAccessibilityService : AccessibilityService() {
                 var clickable: AccessibilityNodeInfo? = node
                 while (clickable != null && !clickable.isClickable) clickable = clickable.parent
                 if (clickable != null) {
+                    // FIX (21.8.2026): skip known chrome/overlay icons
+                    // (jump-to-bottom FAB, overflow menu, etc.) - see
+                    // NON_MEDIA_ICON_DESC_REGEX doc comment. Confirmed via
+                    // on-device log that these were previously winning
+                    // this search instead of the real photo bubble.
+                    val desc = (clickable.contentDescription?.toString() ?: "") +
+                        " " + (node.contentDescription?.toString() ?: "")
+                    if (NON_MEDIA_ICON_DESC_REGEX.containsMatchIn(desc)) {
+                        for (i in 0 until node.childCount) {
+                            val child = node.getChild(i) ?: continue
+                            visit(child)
+                        }
+                        return
+                    }
                     node.getBoundsInScreen(rect)
                     if (rect.bottom > bestBottom) {
                         bestBottom = rect.bottom

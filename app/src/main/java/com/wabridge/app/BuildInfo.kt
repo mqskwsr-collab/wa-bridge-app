@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX44-media-download-tap-diagnostics-2026-08-21"
+    const val BUILD_TAG = "FIX45-media-download-scroll-to-bottom-2026-08-21"
 }
