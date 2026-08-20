@@ -3,8 +3,10 @@ package com.wabridge.app
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -18,6 +20,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var tvStatus: TextView
     private lateinit var tvAccessibilityStatus: TextView
+    private lateinit var tvAllFilesStatus: TextView
     private lateinit var tvLastEvent: TextView
     private lateinit var btnTogglePolling: Button
     private lateinit var etWebAppUrl: EditText
@@ -35,6 +38,7 @@ class MainActivity : AppCompatActivity() {
 
         tvStatus = findViewById(R.id.tvStatus)
         tvAccessibilityStatus = findViewById(R.id.tvAccessibilityStatus)
+        tvAllFilesStatus = findViewById(R.id.tvAllFilesStatus)
         tvLastEvent = findViewById(R.id.tvLastEvent)
         btnTogglePolling = findViewById(R.id.btnTogglePolling)
         findViewById<TextView>(R.id.tvBuildTag).text = "גרסה מותקנת: ${BuildInfo.BUILD_TAG}"
@@ -90,6 +94,27 @@ class MainActivity : AppCompatActivity() {
 
         btnGrantAccessibility.setOnClickListener {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }
+
+        findViewById<Button>(R.id.btnGrantAllFiles).setOnClickListener {
+            // MANAGE_EXTERNAL_STORAGE ("All files access") can't be
+            // requested via a normal runtime permission dialog either -
+            // same manual-grant pattern as notification access and
+            // accessibility above. Below API 30 this permission doesn't
+            // exist at all, so there's nothing to open.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                    intent.data = Uri.parse("package:$packageName")
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    // Some OEM ROMs don't implement the per-app variant of
+                    // this settings screen - fall back to the general one.
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                }
+            } else {
+                Toast.makeText(this, "לא נדרש באנדרואיד הגרסה הזו", Toast.LENGTH_SHORT).show()
+            }
         }
 
         btnSaveUrl.setOnClickListener {
@@ -163,6 +188,17 @@ class MainActivity : AppCompatActivity() {
             "⏹ עצור שירות שליחה (פעיל כרגע)"
         } else {
             "▶ התחל שירות שליחה"
+        }
+
+        val allFilesGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            true // permission concept doesn't exist pre-Android 11
+        }
+        tvAllFilesStatus.text = if (allFilesGranted) {
+            "✅ גישה לכל הקבצים מאושרת - תמונות/וידאו/הקלטות ייתפסו אוטומטית"
+        } else {
+            "❌ גישה לכל הקבצים לא מאושרת - תמונות/וידאו/הקלטות יישלחו כטקסט בלבד עד שתאשר"
         }
     }
 }

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -7,6 +8,24 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!--
+      Phase 3 (media support): needed to read the actual image/video/voice
+      note FILES that WhatsApp writes under
+      Android/media/com.whatsapp/WhatsApp/Media/ - the notification only
+      ever gives us a compressed preview at best, never the real file.
+      Deliberately chosen over the narrower READ_MEDIA_IMAGES/VIDEO/AUDIO
+      trio: WhatsApp is known to drop a .nomedia marker in some of its own
+      media subfolders on some devices/versions, which silently excludes
+      those files from MediaStore (the narrower permissions only grant
+      MediaStore-indexed access) - this app isn't Play-Store-distributed,
+      so the stricter Play policy around this permission doesn't apply,
+      and raw file access sidesteps that indexing gap entirely.
+      Requested manually via Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION
+      (see MainActivity), same manual-grant pattern as notification access
+      and the accessibility service below.
+    -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
 
     <application
         android:name=".WaBridgeApplication"
