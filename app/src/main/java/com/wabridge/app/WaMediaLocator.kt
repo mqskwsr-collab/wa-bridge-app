@@ -59,8 +59,12 @@ object WaMediaLocator {
 
     // How far back (and slightly forward, to absorb clock/IO ordering
     // slack between "file written" and "notification posted") from the
-    // notification's arrival time to consider a file a match.
-    private const val MATCH_WINDOW_MS = 15_000L
+    // notification's arrival time to consider a file a match. Widened
+    // from 15s to 30s (19.8.2026) - real-device testing on the legacy
+    // path found the folder but nothing inside the original window;
+    // the diagnostic added alongside this will confirm the exact real
+    // gap so this can be tuned precisely instead of guessed again.
+    private const val MATCH_WINDOW_MS = 30_000L
 
     data class FoundMedia(val file: File, val mimeType: String)
 
@@ -125,6 +129,7 @@ object WaMediaLocator {
         if (best == null) {
             Log.w(TAG, "No recent file matched in ${dir.absolutePath} within ${MATCH_WINDOW_MS}ms of $notificationTimeMs")
             EventLog.log("Media: ⚠️ לא נמצא קובץ תואם בזמן ב-\"${dir.absolutePath}\"")
+            logCandidateTimings(dir, candidates, notificationTimeMs)
             return null
         }
 
@@ -178,6 +183,33 @@ object WaMediaLocator {
             val androidMediaChildren = androidMedia.list()?.sorted() ?: emptyList()
             val waPkgLike = androidMediaChildren.filter { it.contains("whatsapp", ignoreCase = true) }
             EventLog.log("Media: 🔎 אבחון - חבילות עם \"whatsapp\" תחת Android/media: ${if (waPkgLike.isEmpty()) "(אין)" else waPkgLike.joinToString(" | ")}")
+        } catch (e: Exception) {
+            EventLog.log("Media: 🔎 אבחון נכשל: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /**
+     * DIAGNOSTIC (19.8.2026) - the folder itself was found this time
+     * (legacy path confirmed working), but nothing matched within the
+     * 15s window. Logs the actual candidate files and exactly how far
+     * off (in seconds) each one's lastModified() is from the
+     * notification's postTime - so we can tell, from real numbers,
+     * whether MATCH_WINDOW_MS just needs widening or something else is
+     * going on (e.g. empty folder, or timestamps wildly off).
+     */
+    private fun logCandidateTimings(dir: File, candidates: Array<File>, notificationTimeMs: Long) {
+        try {
+            if (candidates.isEmpty()) {
+                EventLog.log("Media: 🔎 אבחון - התיקייה \"${dir.absolutePath}\" ריקה לגמרי (0 קבצים)")
+                return
+            }
+            val newest = candidates.sortedByDescending { it.lastModified() }.take(5)
+            EventLog.log("Media: 🔎 אבחון - ${candidates.size} קבצים בתיקייה, 5 החדשים ביותר:")
+            newest.forEach { f ->
+                val diffSec = (f.lastModified() - notificationTimeMs) / 1000.0
+                val sign = if (diffSec >= 0) "+" else ""
+                EventLog.log("Media: 🔎 אבחון -   ${f.name} (הפרש מההתראה: $sign${"%.1f".format(diffSec)} שנ')")
+            }
         } catch (e: Exception) {
             EventLog.log("Media: 🔎 אבחון נכשל: ${e.javaClass.simpleName}: ${e.message}")
         }
