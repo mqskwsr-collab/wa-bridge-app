@@ -87,7 +87,7 @@ object WaMediaLocator {
      * notification timestamp, or null if the permission isn't granted,
      * no candidate folder exists, or nothing recent enough was found.
      */
-    fun findRecentMediaFile(context: Context, type: MediaClassifier.MediaType, notificationTimeMs: Long): FoundMedia? {
+    fun findRecentMediaFile(context: Context, type: MediaClassifier.MediaType, notificationTimeMs: Long, matchWindowMs: Long = MATCH_WINDOW_MS): FoundMedia? {
         if (type == MediaClassifier.MediaType.NONE) return null
 
         if (!isAvailable()) {
@@ -123,11 +123,11 @@ object WaMediaLocator {
 
         val candidates = dir.listFiles { f -> f.isFile } ?: emptyArray()
         val best = candidates
-            .filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= MATCH_WINDOW_MS }
+            .filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= matchWindowMs }
             .maxByOrNull { it.lastModified() }
 
         if (best == null) {
-            Log.w(TAG, "No recent file matched in ${dir.absolutePath} within ${MATCH_WINDOW_MS}ms of $notificationTimeMs")
+            Log.w(TAG, "No recent file matched in ${dir.absolutePath} within ${matchWindowMs}ms of $notificationTimeMs")
             EventLog.log("Media: ⚠️ לא נמצא קובץ תואם בזמן ב-\"${dir.absolutePath}\"")
             logCandidateTimings(dir, candidates, notificationTimeMs)
             return null

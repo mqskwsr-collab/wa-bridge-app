@@ -40,6 +40,13 @@ class WaSendAccessibilityService : AccessibilityService() {
         private const val SEARCH_INTERVAL_MS = 400L
         private const val MAX_TAP_ATTEMPTS = 8
         private const val LEARN_TIMEOUT_MS = 18000L
+        private const val MEDIA_DOWNLOAD_TIMEOUT_MS = 13000L
+        // How long to leave the full-image viewer open after tapping,
+        // before backing out - gives WhatsApp time to actually finish
+        // writing the full-quality file to disk. Best-effort guess,
+        // same spirit as every other timing constant in this file;
+        // widen if EventLog shows the file still isn't there afterward.
+        private const val MEDIA_DOWNLOAD_SETTLE_MS = 3000L
         private val MEMBERS_COUNT_REGEX = Regex("""\d+\s*(חברים|חברות|משתתפים|members|participants)""", RegexOption.IGNORE_CASE)
     }
 
@@ -68,6 +75,13 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var phoneLearnStartTime = 0L
     private var phoneLearnStage = 0 // 0=find/click contact header, 1=scan for a phone-shaped string
     private var lastPhoneLearnDumpTime = 0L
+
+    // --- Media forced-download state (separate from all flows above) ---
+    private var downloadingMedia = false
+    private var mediaDownloadStartTime = 0L
+    private var mediaDownloadStage = 0 // 0=find/tap most recent media bubble, 1=settle+back out
+    private var mediaTapTime = 0L
+    private var lastMediaDownloadDumpTime = 0L
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -104,6 +118,16 @@ class WaSendAccessibilityService : AccessibilityService() {
             phoneLearnStage = 0
             lastPhoneLearnDumpTime = 0L
             handler.post(phoneLearnRunnable)
+        }
+
+        if (MediaDownloadCoordinator.hasPendingDownload() && !downloadingMedia) {
+            Log.i(TAG, "WhatsApp window state changed and a media-download trigger is pending - starting")
+            EventLog.log("A11y-MediaDownload: חלון וואטסאפ השתנה, מתחיל תהליך הכרחת הורדה")
+            downloadingMedia = true
+            mediaDownloadStartTime = System.currentTimeMillis()
+            mediaDownloadStage = 0
+            lastMediaDownloadDumpTime = 0L
+            handler.post(mediaDownloadRunnable)
         }
     }
 
@@ -543,6 +567,111 @@ class WaSendAccessibilityService : AccessibilityService() {
                 }
             }
         }
+    }
+
+    /**
+     * FIX (20.8.2026): forces WhatsApp to write the full-quality media
+     * file to disk when Media Auto-Download is off/limited (see
+     * MediaDownloadCoordinator's doc comment for the diagnosis). Stage 0
+     * finds the most recent media bubble (an ImageView-class node
+     * closest to the bottom of the screen, i.e. the newest message in
+     * the chat) and taps it - opening WhatsApp's full-screen viewer is
+     * exactly what triggers a manual-style download of the original
+     * file. Stage 1 just waits a moment for that download to actually
+     * finish writing to disk, then presses back so WhatsApp doesn't sit
+     * on the viewer indefinitely.
+     */
+    private val mediaDownloadRunnable = object : Runnable {
+        override fun run() {
+            val job = MediaDownloadCoordinator.current
+            if (job == null) {
+                downloadingMedia = false
+                return
+            }
+
+            val elapsed = System.currentTimeMillis() - mediaDownloadStartTime
+            if (elapsed > MEDIA_DOWNLOAD_TIMEOUT_MS) {
+                Log.w(TAG, "Timed out forcing media download (stage=$mediaDownloadStage)")
+                EventLog.log("A11y-MediaDownload: ❌ Timeout בשלב $mediaDownloadStage")
+                downloadingMedia = false
+                MediaDownloadCoordinator.reportResult(MediaDownloadCoordinator.Result.TIMEOUT)
+                return
+            }
+
+            val root = rootInActiveWindow
+            if (root == null) {
+                handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                return
+            }
+
+            when (mediaDownloadStage) {
+                0 -> {
+                    if (elapsed - lastMediaDownloadDumpTime > 2000L) {
+                        lastMediaDownloadDumpTime = elapsed
+                        val imgCount = countMatchingClass(root, "ImageView")
+                        EventLog.log("A11y-MediaDownload: 🔍 [+${elapsed / 1000}s] nodes עם 'ImageView' ב-class=$imgCount")
+                    }
+                    val bubble = findBottommostImageNode(root)
+                    if (bubble != null) {
+                        Log.i(TAG, "Found media bubble - tapping to force download")
+                        EventLog.log("A11y-MediaDownload: נמצאה בועת מדיה, לוחץ לפתיחה (הכרחת הורדה)")
+                        bubble.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        mediaDownloadStage = 1
+                        mediaTapTime = System.currentTimeMillis()
+                        handler.postDelayed(this, MEDIA_DOWNLOAD_SETTLE_MS)
+                    } else {
+                        handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                    }
+                }
+                1 -> {
+                    // Enough time has passed since the tap for WhatsApp
+                    // to finish writing the file - back out of the
+                    // full-screen viewer and report success. The actual
+                    // file-on-disk check happens back on the caller's
+                    // side (MediaDownloadLearner / WaMediaLocator).
+                    EventLog.log("A11y-MediaDownload: ✅ ממתין הסתיים, חוזר אחורה")
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    downloadingMedia = false
+                    MediaDownloadCoordinator.reportResult(MediaDownloadCoordinator.Result.SUCCESS)
+                }
+            }
+        }
+    }
+
+    /**
+     * Picks the ImageView-class node whose on-screen bounds sit lowest
+     * (largest bounds.bottom) - in a chat scrolled to the newest
+     * message (which is how WhatsApp opens by default), that's the most
+     * recently received media bubble. Only considers nodes that are
+     * themselves clickable or have a clickable ancestor, since a bare
+     * ImageView with no clickable wrapper can't be tapped meaningfully.
+     */
+    private fun findBottommostImageNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var best: AccessibilityNodeInfo? = null
+        var bestBottom = -1
+        val rect = Rect()
+
+        fun visit(node: AccessibilityNodeInfo) {
+            val cls = node.className?.toString() ?: ""
+            if (cls.contains("ImageView", ignoreCase = true)) {
+                var clickable: AccessibilityNodeInfo? = node
+                while (clickable != null && !clickable.isClickable) clickable = clickable.parent
+                if (clickable != null) {
+                    node.getBoundsInScreen(rect)
+                    if (rect.bottom > bestBottom) {
+                        bestBottom = rect.bottom
+                        best = clickable
+                    }
+                }
+            }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                visit(child)
+            }
+        }
+
+        visit(root)
+        return best
     }
 
     /**
