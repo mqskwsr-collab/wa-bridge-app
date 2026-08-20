@@ -10,16 +10,23 @@ import java.io.File
  * Finds the actual media FILE WhatsApp wrote to disk for a just-arrived
  * notification. The notification itself never carries the real file
  * (at most a small compressed preview embedded in some cases), so this
- * reads directly from WhatsApp's own media folder:
+ * reads directly from WhatsApp's own media folder.
  *
- *   Android/media/com.whatsapp/WhatsApp/Media/
+ * FIX (19.8.2026): on-device diagnostics showed the "new" post-2021
+ * scoped-storage location (Android/media/com.whatsapp/WhatsApp/Media/)
+ * exists but is completely EMPTY on this device/WhatsApp install - no
+ * "WhatsApp" subfolder at all, meaning this install never migrated to
+ * it and is still using the pre-2021 legacy root-level location. Both
+ * are now tried, in order, since which one applies can genuinely differ
+ * per device/WhatsApp version/install history:
+ *
+ *   1) Android/media/com.whatsapp/WhatsApp/Media/   (new, most current installs)
+ *   2) WhatsApp/Media/                              (legacy, storage root)
+ *
+ *   each containing:
  *     ├── WhatsApp Images/
  *     ├── WhatsApp Video/
  *     └── WhatsApp Voice Notes/
- *
- * (this is the "new", post-scoped-storage location WhatsApp moved to
- * around 2021-2022 - the old /WhatsApp/Media/ path at the storage root
- * no longer receives new files on any remotely current WhatsApp version).
  *
  * Requires MANAGE_EXTERNAL_STORAGE ("All files access", granted manually
  * via Settings - see MainActivity) rather than the narrower
@@ -42,7 +49,10 @@ object WaMediaLocator {
 
     private const val TAG = "WaBridgeMedia"
 
-    private const val BASE_PATH = "Android/media/com.whatsapp/WhatsApp/Media"
+    private val CANDIDATE_BASE_PATHS = listOf(
+        "Android/media/com.whatsapp/WhatsApp/Media", // new (post-2021 scoped storage)
+        "WhatsApp/Media"                              // legacy (storage root)
+    )
     private const val SUBFOLDER_IMAGES = "WhatsApp Images"
     private const val SUBFOLDER_VIDEO = "WhatsApp Video"
     private const val SUBFOLDER_VOICE_NOTES = "WhatsApp Voice Notes"
@@ -71,7 +81,7 @@ object WaMediaLocator {
     /**
      * Returns the best-guess file for this media type near the given
      * notification timestamp, or null if the permission isn't granted,
-     * the folder doesn't exist, or nothing recent enough was found.
+     * no candidate folder exists, or nothing recent enough was found.
      */
     fun findRecentMediaFile(context: Context, type: MediaClassifier.MediaType, notificationTimeMs: Long): FoundMedia? {
         if (type == MediaClassifier.MediaType.NONE) return null
@@ -89,11 +99,21 @@ object WaMediaLocator {
             MediaClassifier.MediaType.NONE -> return null
         }
 
-        val dir = File(Environment.getExternalStorageDirectory(), "$BASE_PATH/$subfolder")
-        if (!dir.isDirectory) {
-            Log.w(TAG, "Media folder not found: ${dir.absolutePath}")
-            EventLog.log("Media: ⚠️ תיקיית מדיה לא נמצאה: ${dir.absolutePath}")
-            logNearestExistingAncestor(dir)
+        val root = Environment.getExternalStorageDirectory()
+        var dir: File? = null
+        for (basePath in CANDIDATE_BASE_PATHS) {
+            val candidate = File(root, "$basePath/$subfolder")
+            if (candidate.isDirectory) {
+                dir = candidate
+                break
+            }
+        }
+
+        if (dir == null) {
+            val tried = CANDIDATE_BASE_PATHS.joinToString(" , ") { File(root, "$it/$subfolder").absolutePath }
+            Log.w(TAG, "Media folder not found in any candidate path: $tried")
+            EventLog.log("Media: ⚠️ תיקיית מדיה לא נמצאה באף אחד מהנתיבים: $tried")
+            logDiagnostics(root)
             return null
         }
 
@@ -104,13 +124,13 @@ object WaMediaLocator {
 
         if (best == null) {
             Log.w(TAG, "No recent file matched in ${dir.absolutePath} within ${MATCH_WINDOW_MS}ms of $notificationTimeMs")
-            EventLog.log("Media: ⚠️ לא נמצא קובץ תואם בזמן ב-\"$subfolder\"")
+            EventLog.log("Media: ⚠️ לא נמצא קובץ תואם בזמן ב-\"${dir.absolutePath}\"")
             return null
         }
 
         val mimeType = guessMimeType(best.name)
         Log.i(TAG, "Matched media file: ${best.absolutePath} (mime=$mimeType)")
-        EventLog.log("Media: ✅ נמצא קובץ: ${best.name}")
+        EventLog.log("Media: ✅ נמצא קובץ: ${best.name} (ב-${dir.absolutePath})")
         return FoundMedia(best, mimeType)
     }
 
@@ -130,30 +150,34 @@ object WaMediaLocator {
     }
 
     /**
-     * DIAGNOSTIC (19.8.2026) - the expected WhatsApp Images/Video/Voice
-     * Notes subfolders came up "not found" on real devices, which means
-     * the hardcoded BASE_PATH assumption doesn't match reality on those
-     * specific devices/WhatsApp versions (folder names/casing/nesting
-     * can genuinely differ). Rather than guess again from web research,
-     * this walks UP from the expected path until it finds a directory
-     * that actually exists, then logs exactly what's really inside it -
-     * so the real, on-device structure can be read straight from
-     * EventLog and BASE_PATH fixed to match reality, instead of guessed
-     * at again.
+     * DIAGNOSTIC (19.8.2026) - neither candidate base path panned out
+     * (confirmed on-device: Android/media/com.whatsapp exists but is
+     * completely empty, meaning that install never migrated to it - see
+     * class doc comment). Rather than add a third guessed candidate path,
+     * this does a broad, case-insensitive scan of the storage root for
+     * ANY folder whose name contains "whatsapp", and logs what it finds -
+     * covering unexpected casing/naming we haven't anticipated, so the
+     * real answer can be read straight from EventLog.
      */
-    private fun logNearestExistingAncestor(missingDir: File) {
+    private fun logDiagnostics(root: File) {
         try {
-            var probe: File? = missingDir
-            while (probe != null && !probe.isDirectory) {
-                probe = probe.parentFile
+            val rootChildren = root.list()?.sorted() ?: emptyList()
+            EventLog.log("Media: 🔎 אבחון - תוכן שורש האחסון (${root.absolutePath}): ${if (rootChildren.isEmpty()) "(ריקה/לא נגיש)" else rootChildren.joinToString(" | ")}")
+
+            val whatsappLike = rootChildren.filter { it.contains("whatsapp", ignoreCase = true) }
+            if (whatsappLike.isNotEmpty()) {
+                EventLog.log("Media: 🔎 אבחון - תיקיות שמכילות \"whatsapp\" בשורש: ${whatsappLike.joinToString(" | ")}")
+                whatsappLike.forEach { name ->
+                    val sub = File(root, name)
+                    val subChildren = sub.list()?.sorted() ?: emptyList()
+                    EventLog.log("Media: 🔎 אבחון - תוכן \"$name\": ${if (subChildren.isEmpty()) "(ריקה)" else subChildren.joinToString(" | ")}")
+                }
             }
-            if (probe == null) {
-                EventLog.log("Media: 🔎 אבחון - אפילו /storage/emulated/0 לא נגיש?!")
-                return
-            }
-            val children = probe.list()?.sorted() ?: emptyList()
-            EventLog.log("Media: 🔎 אבחון - התיקייה הקיימת הכי קרובה: ${probe.absolutePath}")
-            EventLog.log("Media: 🔎 אבחון - תוכן התיקייה: ${if (children.isEmpty()) "(ריקה)" else children.joinToString(" | ")}")
+
+            val androidMedia = File(root, "Android/media")
+            val androidMediaChildren = androidMedia.list()?.sorted() ?: emptyList()
+            val waPkgLike = androidMediaChildren.filter { it.contains("whatsapp", ignoreCase = true) }
+            EventLog.log("Media: 🔎 אבחון - חבילות עם \"whatsapp\" תחת Android/media: ${if (waPkgLike.isEmpty()) "(אין)" else waPkgLike.joinToString(" | ")}")
         } catch (e: Exception) {
             EventLog.log("Media: 🔎 אבחון נכשל: ${e.javaClass.simpleName}: ${e.message}")
         }
