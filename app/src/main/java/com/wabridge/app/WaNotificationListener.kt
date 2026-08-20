@@ -1,6 +1,7 @@
 package com.wabridge.app
 
 import android.app.Notification
+import android.app.PendingIntent
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -215,8 +216,9 @@ class WaNotificationListener : NotificationListenerService() {
         // this exact conversation, no invite link needed) - used below
         // to automatically learn a new group's invite link the first
         // time it messages in.
+        var contentIntent: PendingIntent? = null
         try {
-            val contentIntent = sbn.notification.contentIntent
+            contentIntent = sbn.notification.contentIntent
             if (contentIntent != null) {
                 OpenIntentRegistry.put(canonicalTarget, contentIntent)
             }
@@ -253,18 +255,19 @@ class WaNotificationListener : NotificationListenerService() {
         Log.i(TAG, "WhatsApp notification: title='$outgoingTitle' text='$text' phone=$phone isGroup=$isGroup -> forwarding")
         EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
         val postTimeMs = sbn.postTime
-        executor.execute { postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs) }
+        val contentIntentFinal = contentIntent
+        executor.execute { postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs, canonicalTarget, contentIntentFinal) }
     }
 
     
-    private fun postToAppsScript(webAppUrl: String, title: String, text: String, phone: String?, isGroup: Boolean?, postTimeMs: Long) {
+    private fun postToAppsScript(webAppUrl: String, title: String, text: String, phone: String?, isGroup: Boolean?, postTimeMs: Long, target: String, contentIntent: PendingIntent?) {
         try {
             val body = JSONObject().apply {
                 put("title", title)
                 put("text", text)
                 if (phone != null) put("phone", phone)
                 if (isGroup != null) put("isGroup", isGroup)
-                attachMediaIfAny(this, text, postTimeMs)
+                attachMediaIfAny(this, text, postTimeMs, target, contentIntent)
             }.toString()
 
             val url = URL(webAppUrl)
@@ -299,13 +302,32 @@ class WaNotificationListener : NotificationListenerService() {
      * untouched - the plain-text notification still gets sent exactly as
      * it always has, media or no media. Never throws.
      */
-    private fun attachMediaIfAny(body: JSONObject, text: String, postTimeMs: Long) {
+    private fun attachMediaIfAny(body: JSONObject, text: String, postTimeMs: Long, target: String, contentIntent: PendingIntent?) {
         try {
             val mediaType = MediaClassifier.classify(text)
             if (mediaType == MediaClassifier.MediaType.NONE) return
 
             EventLog.log("Listener: 🖼️ הודעה מסווגת כמדיה (${mediaType.name}) - מחפש קובץ...")
-            val found = WaMediaLocator.findRecentMediaFile(this, mediaType, postTimeMs) ?: return
+            var found = WaMediaLocator.findRecentMediaFile(this, mediaType, postTimeMs)
+
+            if (found == null) {
+                // FIX (20.8.2026): the file wasn't on disk at all (not a
+                // timing/path issue - confirmed via diagnostics that the
+                // correct folder exists but is completely empty), most
+                // likely because Media Auto-Download is off/limited on
+                // this device. Force WhatsApp to actually download the
+                // full-quality original by opening the chat and tapping
+                // the media bubble, then re-scan with a wider window
+                // covering however long that automation took.
+                val triggerStart = System.currentTimeMillis()
+                val triggered = MediaDownloadLearner.triggerDownloadAndWait(this, target, contentIntent)
+                if (triggered) {
+                    val elapsedSinceTrigger = System.currentTimeMillis() - triggerStart
+                    found = WaMediaLocator.findRecentMediaFile(this, mediaType, System.currentTimeMillis(), matchWindowMs = elapsedSinceTrigger + 5000L)
+                }
+            }
+
+            found ?: return
 
             if (found.file.length() > MEDIA_SIZE_CAP_BYTES) {
                 val mb = found.file.length() / (1024 * 1024)
