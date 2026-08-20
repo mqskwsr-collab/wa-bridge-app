@@ -108,6 +108,35 @@
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:text="שלב 3 - תמיכה בתמונות/וידאו/הקלטות"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="12dp" />
+
+    <TextView
+        android:id="@+id/tvAllFilesStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="בודק..."
+        android:textSize="16sp"
+        android:layout_marginBottom="8dp" />
+
+    <Button
+        android:id="@+id/btnGrantAllFiles"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="פתח הגדרות גישה לכל הקבצים" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#DDDDDD"
+        android:layout_marginTop="24dp"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
         android:text="יומן אירועים (מתעדכן חי):"
         android:textSize="16sp"
         android:textStyle="bold"

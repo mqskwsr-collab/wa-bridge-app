@@ -48,6 +48,15 @@ class WaNotificationListener : NotificationListenerService() {
         private var lastKey: String? = null
         private var lastTimestamp: Long = 0L
         private const val DEDUPE_WINDOW_MS = 3000L
+
+        // FIX (19.8.2026) - media support, phase 1 (inbound only). Raw
+        // file size cap before base64 (which inflates size by ~33%) -
+        // keeps the encoded payload comfortably under both Apps Script's
+        // doPost request-size ceiling and Gmail's ~25MB attachment limit.
+        // Images and voice notes are essentially always well under this;
+        // it mainly exists to gracefully skip oversized videos rather
+        // than attempt (and likely fail) a huge upload.
+        private const val MEDIA_SIZE_CAP_BYTES = 12L * 1024 * 1024 // 12MB
     }
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -243,17 +252,19 @@ class WaNotificationListener : NotificationListenerService() {
 
         Log.i(TAG, "WhatsApp notification: title='$outgoingTitle' text='$text' phone=$phone isGroup=$isGroup -> forwarding")
         EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
-        executor.execute { postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup) }
+        val postTimeMs = sbn.postTime
+        executor.execute { postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs) }
     }
 
     
-    private fun postToAppsScript(webAppUrl: String, title: String, text: String, phone: String?, isGroup: Boolean?) {
+    private fun postToAppsScript(webAppUrl: String, title: String, text: String, phone: String?, isGroup: Boolean?, postTimeMs: Long) {
         try {
             val body = JSONObject().apply {
                 put("title", title)
                 put("text", text)
                 if (phone != null) put("phone", phone)
                 if (isGroup != null) put("isGroup", isGroup)
+                attachMediaIfAny(this, text, postTimeMs)
             }.toString()
 
             val url = URL(webAppUrl)
@@ -276,6 +287,46 @@ class WaNotificationListener : NotificationListenerService() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to POST notification to Apps Script", e)
             EventLog.log("Listener: ❌ שליחה נכשלה: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /**
+     * Best-effort: if the notification text looks like media (see
+     * MediaClassifier), tries to locate the actual file on disk and add
+     * mediaBase64/mediaMimeType/mediaFileName fields to the outgoing JSON
+     * body. On ANY failure along the way (permission not granted, file
+     * not found, file too large) this simply leaves the JSON body
+     * untouched - the plain-text notification still gets sent exactly as
+     * it always has, media or no media. Never throws.
+     */
+    private fun attachMediaIfAny(body: JSONObject, text: String, postTimeMs: Long) {
+        try {
+            val mediaType = MediaClassifier.classify(text)
+            if (mediaType == MediaClassifier.MediaType.NONE) return
+
+            EventLog.log("Listener: 🖼️ הודעה מסווגת כמדיה (${mediaType.name}) - מחפש קובץ...")
+            val found = WaMediaLocator.findRecentMediaFile(this, mediaType, postTimeMs) ?: return
+
+            if (found.file.length() > MEDIA_SIZE_CAP_BYTES) {
+                val mb = found.file.length() / (1024 * 1024)
+                Log.w(TAG, "Media file too large to attach: ${found.file.name} (${mb}MB)")
+                EventLog.log("Listener: ⚠️ קובץ המדיה גדול מדי לצירוף אוטומטי (${mb}MB) - נשלח כטקסט בלבד")
+                return
+            }
+
+            val bytes = found.file.readBytes()
+            val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            body.put("mediaBase64", base64)
+            body.put("mediaMimeType", found.mimeType)
+            body.put("mediaFileName", found.file.name)
+            Log.i(TAG, "Attaching media: ${found.file.name} (${bytes.size} bytes, ${found.mimeType})")
+            EventLog.log("Listener: 📎 מצרף קובץ מדיה: ${found.file.name} (${bytes.size / 1024}KB)")
+        } catch (e: Exception) {
+            // Deliberately swallow - see doc comment above. A media
+            // lookup/read failure must never prevent the plain-text
+            // notification from being sent.
+            Log.e(TAG, "Failed to attach media (non-fatal, sending text only)", e)
+            EventLog.log("Listener: ⚠️ צירוף מדיה נכשל (לא קריטי, נשלח כטקסט): ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
