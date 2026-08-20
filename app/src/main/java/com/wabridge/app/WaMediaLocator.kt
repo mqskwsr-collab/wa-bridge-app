@@ -93,6 +93,7 @@ object WaMediaLocator {
         if (!dir.isDirectory) {
             Log.w(TAG, "Media folder not found: ${dir.absolutePath}")
             EventLog.log("Media: ⚠️ תיקיית מדיה לא נמצאה: ${dir.absolutePath}")
+            logNearestExistingAncestor(dir)
             return null
         }
 
@@ -125,6 +126,36 @@ object WaMediaLocator {
             "m4a" -> "audio/mp4"
             "aac" -> "audio/aac"
             else -> "application/octet-stream"
+        }
+    }
+
+    /**
+     * DIAGNOSTIC (19.8.2026) - the expected WhatsApp Images/Video/Voice
+     * Notes subfolders came up "not found" on real devices, which means
+     * the hardcoded BASE_PATH assumption doesn't match reality on those
+     * specific devices/WhatsApp versions (folder names/casing/nesting
+     * can genuinely differ). Rather than guess again from web research,
+     * this walks UP from the expected path until it finds a directory
+     * that actually exists, then logs exactly what's really inside it -
+     * so the real, on-device structure can be read straight from
+     * EventLog and BASE_PATH fixed to match reality, instead of guessed
+     * at again.
+     */
+    private fun logNearestExistingAncestor(missingDir: File) {
+        try {
+            var probe: File? = missingDir
+            while (probe != null && !probe.isDirectory) {
+                probe = probe.parentFile
+            }
+            if (probe == null) {
+                EventLog.log("Media: 🔎 אבחון - אפילו /storage/emulated/0 לא נגיש?!")
+                return
+            }
+            val children = probe.list()?.sorted() ?: emptyList()
+            EventLog.log("Media: 🔎 אבחון - התיקייה הקיימת הכי קרובה: ${probe.absolutePath}")
+            EventLog.log("Media: 🔎 אבחון - תוכן התיקייה: ${if (children.isEmpty()) "(ריקה)" else children.joinToString(" | ")}")
+        } catch (e: Exception) {
+            EventLog.log("Media: 🔎 אבחון נכשל: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 }
