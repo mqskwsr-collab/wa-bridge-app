@@ -58,6 +58,22 @@ class WaSendAccessibilityService : AccessibilityService() {
         // scroll-to-bottom fix, in case that doesn't fully resolve it on
         // some device/WhatsApp version.
         private val NON_MEDIA_ICON_DESC_REGEX = Regex("""(עבור אל ההודעה האחרונה|עבור להודעה האחרונה|scroll to (the )?last message|go to last message|more options|options menu|camera|attach|voice message|emoji|search|send)""", RegexOption.IGNORE_CASE)
+        // FIX (21.8.2026): the FULL on-device tree dump (see FIX46)
+        // revealed the real culprit for why imgCount stayed flat at 2
+        // the whole timeout - the photo bubble is classed as
+        // android.widget.Button, NOT ImageView at all:
+        //   class=android.widget.Button desc='הגדלת התמונה' bounds=...
+        // ("הגדלת התמונה" = "enlarge the image"). Matching on class name
+        // was never going to work reliably here - WhatsApp has already
+        // fooled this exact class-name-substring approach twice now (see
+        // findEditText's older fix, and the media bubble itself). This
+        // regex instead matches the STABLE content-description directly,
+        // regardless of what class WhatsApp decides to wrap it in.
+        // Includes a video-bubble guess (unconfirmed, but likely
+        // analogous - "הפעלת הסרטון"/"play video") since MediaClassifier
+        // also handles VIDEO; safe to leave in even if never confirmed,
+        // since it only narrows what counts as a match.
+        private val MEDIA_BUBBLE_DESC_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image|play video|הפעלת הסרטון)""", RegexOption.IGNORE_CASE)
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -764,14 +780,58 @@ class WaSendAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Finds the media bubble to tap. Primary strategy (FIX 21.8.2026):
+     * search by the STABLE content-description WhatsApp actually uses
+     * (MEDIA_BUBBLE_DESC_REGEX - confirmed via on-device full-tree dump
+     * to be android.widget.Button, desc='הגדלת התמונה', NOT ImageView).
+     * Falls back to the older bottommost-clickable-ImageView heuristic
+     * only if no description match is found, as a safety net for
+     * WhatsApp versions/locales where the description text differs.
+     */
+    private fun findBottommostImageNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        findNodeByDescription(root)?.let { return it }
+        return findBottommostImageViewClassed(root)
+    }
+
+    private fun findNodeByDescription(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var best: AccessibilityNodeInfo? = null
+        var bestBottom = -1
+        val rect = Rect()
+
+        fun visit(node: AccessibilityNodeInfo) {
+            val desc = node.contentDescription?.toString() ?: ""
+            if (MEDIA_BUBBLE_DESC_REGEX.containsMatchIn(desc)) {
+                var clickable: AccessibilityNodeInfo? = node
+                while (clickable != null && !clickable.isClickable) clickable = clickable.parent
+                val target = clickable ?: node
+                target.getBoundsInScreen(rect)
+                if (rect.bottom > bestBottom) {
+                    bestBottom = rect.bottom
+                    best = target
+                }
+            }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                visit(child)
+            }
+        }
+
+        visit(root)
+        return best
+    }
+
+    /**
      * Picks the ImageView-class node whose on-screen bounds sit lowest
      * (largest bounds.bottom) - in a chat scrolled to the newest
      * message (which is how WhatsApp opens by default), that's the most
      * recently received media bubble. Only considers nodes that are
      * themselves clickable or have a clickable ancestor, since a bare
      * ImageView with no clickable wrapper can't be tapped meaningfully.
+     * FALLBACK ONLY - see findBottommostImageNode's doc comment; the
+     * real media bubble was confirmed NOT to be ImageView-classed, so
+     * this heuristic is kept only as a safety net.
      */
-    private fun findBottommostImageNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+    private fun findBottommostImageViewClassed(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         var best: AccessibilityNodeInfo? = null
         var bestBottom = -1
         val rect = Rect()

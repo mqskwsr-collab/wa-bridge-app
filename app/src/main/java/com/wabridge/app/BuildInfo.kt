@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX47-media-download-poll-instead-of-blind-wait-2026-08-21"
+    const val BUILD_TAG = "FIX48-media-bubble-desc-match-2026-08-21"
 }
