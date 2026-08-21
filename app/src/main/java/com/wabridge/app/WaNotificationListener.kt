@@ -320,7 +320,7 @@ class WaNotificationListener : NotificationListenerService() {
                 // the media bubble, then re-scan with a wider window
                 // covering however long that automation took.
                 val triggerStart = System.currentTimeMillis()
-                val triggered = MediaDownloadLearner.triggerDownloadAndWait(this, target, contentIntent)
+                val triggered = MediaDownloadLearner.triggerDownloadAndWait(this, target, mediaType, contentIntent)
                 if (triggered) {
                     val elapsedSinceTrigger = System.currentTimeMillis() - triggerStart
                     found = WaMediaLocator.findRecentMediaFile(this, mediaType, System.currentTimeMillis(), matchWindowMs = elapsedSinceTrigger + 5000L)

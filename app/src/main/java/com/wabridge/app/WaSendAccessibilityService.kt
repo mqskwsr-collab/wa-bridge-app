@@ -40,13 +40,12 @@ class WaSendAccessibilityService : AccessibilityService() {
         private const val SEARCH_INTERVAL_MS = 400L
         private const val MAX_TAP_ATTEMPTS = 8
         private const val LEARN_TIMEOUT_MS = 18000L
-        private const val MEDIA_DOWNLOAD_TIMEOUT_MS = 13000L
-        // How long to leave the full-image viewer open after tapping,
-        // before backing out - gives WhatsApp time to actually finish
-        // writing the full-quality file to disk. Best-effort guess,
-        // same spirit as every other timing constant in this file;
-        // widen if EventLog shows the file still isn't there afterward.
-        private const val MEDIA_DOWNLOAD_SETTLE_MS = 3000L
+        private const val MEDIA_DOWNLOAD_TIMEOUT_MS = 14000L
+        // How often to re-check the media folder while the full-image
+        // viewer is open, waiting for WhatsApp to finish writing the
+        // real file to disk (see stage 1 doc comment - replaces the old
+        // fixed MEDIA_DOWNLOAD_SETTLE_MS blind wait).
+        private const val MEDIA_DOWNLOAD_POLL_INTERVAL_MS = 1000L
         private val MEMBERS_COUNT_REGEX = Regex("""\d+\s*(חברים|חברות|משתתפים|members|participants)""", RegexOption.IGNORE_CASE)
         // Matches WhatsApp's "jump to newest message" floating button
         // across the Hebrew/English variants observed in practice.
@@ -622,6 +621,14 @@ class WaSendAccessibilityService : AccessibilityService() {
             if (elapsed > MEDIA_DOWNLOAD_TIMEOUT_MS) {
                 Log.w(TAG, "Timed out forcing media download (stage=$mediaDownloadStage)")
                 EventLog.log("A11y-MediaDownload: ❌ Timeout בשלב $mediaDownloadStage")
+                // FIX (21.8.2026): if the timeout fires while stage 1's
+                // new polling loop is still waiting (i.e. we're still
+                // sitting in WhatsApp's full-screen photo viewer), back
+                // out before giving up - otherwise the app is left
+                // stuck displaying the image indefinitely.
+                if (mediaDownloadStage == 1) {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                }
                 downloadingMedia = false
                 MediaDownloadCoordinator.reportResult(MediaDownloadCoordinator.Result.TIMEOUT)
                 return
@@ -710,21 +717,47 @@ class WaSendAccessibilityService : AccessibilityService() {
                         bubble.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                         mediaDownloadStage = 1
                         mediaTapTime = System.currentTimeMillis()
-                        handler.postDelayed(this, MEDIA_DOWNLOAD_SETTLE_MS)
+                        handler.postDelayed(this, MEDIA_DOWNLOAD_POLL_INTERVAL_MS)
                     } else {
                         handler.postDelayed(this, SEARCH_INTERVAL_MS)
                     }
                 }
                 1 -> {
-                    // Enough time has passed since the tap for WhatsApp
-                    // to finish writing the file - back out of the
-                    // full-screen viewer and report success. The actual
-                    // file-on-disk check happens back on the caller's
-                    // side (MediaDownloadLearner / WaMediaLocator).
-                    EventLog.log("A11y-MediaDownload: ✅ ממתין הסתיים, חוזר אחורה")
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    downloadingMedia = false
-                    MediaDownloadCoordinator.reportResult(MediaDownloadCoordinator.Result.SUCCESS)
+                    // FIX (21.8.2026): was a blind fixed 3s wait then
+                    // unconditional "back" - on-device log (21.8 10:25)
+                    // showed the CORRECT bubble now gets tapped (desc=
+                    // 'הגדלת התמונה', a real photo, not a toolbar icon)
+                    // but the media folder was STILL empty afterward.
+                    // Most likely explanation: WhatsApp hadn't actually
+                    // finished downloading the full-quality file within
+                    // that fixed 3s, and navigating away (GLOBAL_ACTION_
+                    // BACK) while the viewer is still loading likely
+                    // cancels the in-flight download outright. Now
+                    // actively polls the real media folder (via the same
+                    // WaMediaLocator used by the normal, non-forced path)
+                    // every second, and only backs out once the file is
+                    // actually confirmed on disk - or once the overall
+                    // MEDIA_DOWNLOAD_TIMEOUT_MS budget runs out, in which
+                    // case it still backs out (so WhatsApp doesn't sit on
+                    // the viewer forever) but reports TIMEOUT instead of
+                    // a false SUCCESS, so the caller knows not to trust a
+                    // rescan blindly.
+                    val elapsedSinceTap = System.currentTimeMillis() - mediaTapTime
+                    val found = WaMediaLocator.findRecentMediaFile(
+                        this@WaSendAccessibilityService,
+                        job.mediaType,
+                        mediaTapTime,
+                        matchWindowMs = elapsedSinceTap + 5000L
+                    )
+                    if (found != null) {
+                        EventLog.log("A11y-MediaDownload: ✅ קובץ אותר בדיסק (${found.file.name}) אחרי ${elapsedSinceTap / 1000}s - חוזר אחורה")
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                        downloadingMedia = false
+                        MediaDownloadCoordinator.reportResult(MediaDownloadCoordinator.Result.SUCCESS)
+                    } else {
+                        EventLog.log("A11y-MediaDownload: ⏳ [+${elapsedSinceTap / 1000}s] הקובץ עדיין לא נמצא בדיסק, ממשיך להמתין...")
+                        handler.postDelayed(this, MEDIA_DOWNLOAD_POLL_INTERVAL_MS)
+                    }
                 }
             }
         }

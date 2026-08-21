@@ -15,7 +15,7 @@ package com.wabridge.app
  */
 object MediaDownloadCoordinator {
 
-    data class PendingDownload(val target: String)
+    data class PendingDownload(val target: String, val mediaType: MediaClassifier.MediaType)
 
     enum class Result { SUCCESS, FAILED_NO_MEDIA_NODE_FOUND, TIMEOUT }
 

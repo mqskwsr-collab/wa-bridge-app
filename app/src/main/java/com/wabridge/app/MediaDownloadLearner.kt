@@ -32,7 +32,7 @@ object MediaDownloadLearner {
      * was skipped entirely (another flow was already running, or no
      * contentIntent/chat was available) or timed out.
      */
-    fun triggerDownloadAndWait(context: Context, target: String, contentIntent: PendingIntent?): Boolean {
+    fun triggerDownloadAndWait(context: Context, target: String, mediaType: MediaClassifier.MediaType, contentIntent: PendingIntent?): Boolean {
         if (contentIntent == null) return false
 
         if (MediaDownloadCoordinator.hasPendingDownload() ||
@@ -50,7 +50,7 @@ object MediaDownloadLearner {
         val latch = CountDownLatch(1)
         var result = MediaDownloadCoordinator.Result.TIMEOUT
 
-        MediaDownloadCoordinator.startDownload(MediaDownloadCoordinator.PendingDownload(target)) { r ->
+        MediaDownloadCoordinator.startDownload(MediaDownloadCoordinator.PendingDownload(target, mediaType)) { r ->
             result = r
             latch.countDown()
         }
