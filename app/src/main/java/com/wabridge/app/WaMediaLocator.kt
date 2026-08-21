@@ -68,18 +68,27 @@ object WaMediaLocator {
 
     data class FoundMedia(val file: File, val mimeType: String)
 
-    fun isAvailable(): Boolean {
-        // Environment.isExternalStorageManager() only exists from API 30
-        // (Android 11) onward - minSdk for this app is 26, so this must
-        // be version-guarded or it crashes on older devices with a
-        // NoSuchMethodError. Below API 30, MANAGE_EXTERNAL_STORAGE isn't
-        // a thing yet and legacy external storage access rules apply
-        // instead; treating it as "available" there is fine since this
-        // whole media feature is a best-effort add-on that already fails
-        // safe (see attachMediaIfAny's try/catch) if direct file access
-        // turns out not to work on such a device.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return true
-        return Environment.isExternalStorageManager()
+    fun isAvailable(context: Context): Boolean {
+        // FIX (21.8.2026): was hardcoded `true` below API 30 with the
+        // reasoning "permission concept doesn't exist pre-Android 11" -
+        // true for MANAGE_EXTERNAL_STORAGE specifically, but WRONG in
+        // general: READ_EXTERNAL_STORAGE is still a required runtime
+        // (dangerous) permission on API 23-29, and this app never
+        // declared or requested it (see AndroidManifest.xml fix, same
+        // date). On a pre-Android-11 device that never got asked for it,
+        // this hardcoded `true` was a straight-up lie that made every
+        // subsequent listFiles() call silently return empty - exactly
+        // the "0 files" symptom confirmed on-device, including for
+        // long-pre-existing files a separate file manager could see
+        // just fine. Now actually checks the real OS-reported state on
+        // both branches instead of assuming.
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
     }
 
     /**
@@ -90,9 +99,9 @@ object WaMediaLocator {
     fun findRecentMediaFile(context: Context, type: MediaClassifier.MediaType, notificationTimeMs: Long, matchWindowMs: Long = MATCH_WINDOW_MS): FoundMedia? {
         if (type == MediaClassifier.MediaType.NONE) return null
 
-        if (!isAvailable()) {
-            Log.w(TAG, "MANAGE_EXTERNAL_STORAGE not granted - cannot locate media file")
-            EventLog.log("Media: ⚠️ אין הרשאת \"כל הקבצים\" - לא ניתן לאתר את קובץ המדיה")
+        if (!isAvailable(context)) {
+            Log.w(TAG, "Storage read permission not granted - cannot locate media file")
+            EventLog.log("Media: ⚠️ אין הרשאת קריאת אחסון - לא ניתן לאתר את קובץ המדיה")
             return null
         }
 
@@ -122,6 +131,25 @@ object WaMediaLocator {
         }
 
         val candidates = dir.listFiles { f -> f.isFile } ?: emptyArray()
+        if (candidates.isEmpty()) {
+            // DIAGNOSTIC (21.8.2026): on-device logs show this folder
+            // reporting 0 files EVERY time, including for files that are
+            // NOT new (72 pre-existing files confirmed present via a
+            // separate file manager app, some days old) - so this isn't
+            // "new file not visible yet", listFiles() is failing to see
+            // ANY of the directory's contents. That points at a
+            // permission problem masquerading as an empty folder, not a
+            // path or timing problem. Log the raw signals needed to tell
+            // apart the possible causes: is isExternalStorageManager()
+            // actually true, can we even read/execute the dir, and does
+            // the plain String[] list() (different underlying code path
+            // than listFiles()) agree or disagree with listFiles().
+            EventLog.log(
+                "Media: 🔎 אבחון הרשאות - sdkInt=${Build.VERSION.SDK_INT} isExternalStorageManager=${isAvailable(context)} " +
+                    "dir.exists=${dir.exists()} dir.canRead=${dir.canRead()} dir.canExecute=${dir.canExecute()} " +
+                    "list()=${dir.list()?.size ?: "null"} listFiles()=${candidates.size}"
+            )
+        }
         val best = candidates
             .filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= matchWindowMs }
             .maxByOrNull { it.lastModified() }

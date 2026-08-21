@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX48-media-bubble-desc-match-2026-08-21"
+    const val BUILD_TAG = "FIX49-pre-android11-storage-permission-2026-08-21"
 }

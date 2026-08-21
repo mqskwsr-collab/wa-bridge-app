@@ -26,6 +26,21 @@
     -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
+    <!--
+      FIX (21.8.2026): MANAGE_EXTERNAL_STORAGE only exists as a concept
+      on Android 11+ (API 30+). On earlier versions, reading files
+      outside the app's own sandbox still requires the classic
+      READ_EXTERNAL_STORAGE runtime (dangerous) permission - this was
+      missing entirely, which is exactly why every listFiles() call
+      silently returned empty on a pre-Android-11 device (confirmed via
+      on-device diagnostics: the media folder reported 0 files even for
+      pre-existing files a separate file manager could see just fine).
+      maxSdkVersion=32 is the standard pattern - API 33+ replaced this
+      with the granular READ_MEDIA_* permissions, and this app already
+      relies on MANAGE_EXTERNAL_STORAGE there instead.
+    -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:name=".WaBridgeApplication"

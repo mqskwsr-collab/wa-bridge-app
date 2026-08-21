@@ -1,8 +1,10 @@
 package com.wabridge.app
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -15,8 +17,14 @@ import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        private const val REQUEST_CODE_READ_STORAGE = 1001
+    }
 
     private lateinit var tvStatus: TextView
     private lateinit var tvAccessibilityStatus: TextView
@@ -100,8 +108,15 @@ class MainActivity : AppCompatActivity() {
             // MANAGE_EXTERNAL_STORAGE ("All files access") can't be
             // requested via a normal runtime permission dialog either -
             // same manual-grant pattern as notification access and
-            // accessibility above. Below API 30 this permission doesn't
-            // exist at all, so there's nothing to open.
+            // accessibility above.
+            // FIX (21.8.2026): below API 30 this used to just show a
+            // "not needed" toast and do nothing else, on the (wrong)
+            // assumption that no permission was needed at all pre-
+            // Android-11. In reality READ_EXTERNAL_STORAGE is still a
+            // normal runtime-requestable permission there, and it was
+            // never being requested - confirmed on-device as the actual
+            // root cause of every media download silently failing on a
+            // pre-R test device. Now requests it properly there instead.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 try {
                     val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
@@ -113,7 +128,9 @@ class MainActivity : AppCompatActivity() {
                     startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
                 }
             } else {
-                Toast.makeText(this, "לא נדרש באנדרואיד הגרסה הזו", Toast.LENGTH_SHORT).show()
+                ActivityCompat.requestPermissions(
+                    this, arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), REQUEST_CODE_READ_STORAGE
+                )
             }
         }
 
@@ -163,6 +180,18 @@ class MainActivity : AppCompatActivity() {
         uiHandler.removeCallbacks(logRefreshRunnable)
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_CODE_READ_STORAGE) {
+            // Refresh the on-screen status immediately with the result,
+            // same as every other manual-grant flow already does via
+            // onResume when returning from a Settings screen.
+            updateStatus()
+        }
+    }
+
     private fun updateStatus() {
         val enabledListeners = Settings.Secure.getString(
             contentResolver, "enabled_notification_listeners"
@@ -193,7 +222,12 @@ class MainActivity : AppCompatActivity() {
         val allFilesGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             Environment.isExternalStorageManager()
         } else {
-            true // permission concept doesn't exist pre-Android 11
+            // FIX (21.8.2026): was hardcoded `true` here - see the long
+            // comment on WaMediaLocator.isAvailable() (same date) for
+            // why that was wrong and what it broke on-device.
+            ContextCompat.checkSelfPermission(
+                this, Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == PackageManager.PERMISSION_GRANTED
         }
         tvAllFilesStatus.text = if (allFilesGranted) {
             "✅ גישה לכל הקבצים מאושרת - תמונות/וידאו/הקלטות ייתפסו אוטומטית"
