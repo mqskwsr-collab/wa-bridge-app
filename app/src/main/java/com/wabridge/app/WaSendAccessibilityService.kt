@@ -94,6 +94,7 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var mediaTapTime = 0L
     private var lastMediaDownloadDumpTime = 0L
     private var scrolledToLatestMessage = false
+    private var hasDumpedFullMediaTree = false
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -153,6 +154,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             // the real bubble.
             mediaDownloadStage = -1
             scrolledToLatestMessage = false
+            hasDumpedFullMediaTree = false
             lastMediaDownloadDumpTime = 0L
             handler.post(mediaDownloadRunnable)
         }
@@ -659,6 +661,25 @@ class WaSendAccessibilityService : AccessibilityService() {
                         val imgCount = countMatchingClass(root, "ImageView")
                         EventLog.log("A11y-MediaDownload: 🔍 [+${elapsed / 1000}s] nodes עם 'ImageView' ב-class=$imgCount")
                     }
+                    // DIAGNOSTIC (21.8.2026): imgCount stayed FLAT across
+                    // an entire 12s timeout on-device (both runs, 2-3
+                    // nodes, never increasing) even after the stage -1
+                    // scroll-to-bottom fix confirmed firing. That rules
+                    // out "not rendered yet" as the remaining problem -
+                    // the photo bubble is on screen but its clickable
+                    // element apparently isn't ImageView-classed at all.
+                    // We already hit this exact pattern once before with
+                    // the message EditText (see findEditText's comment)
+                    // - WhatsApp doesn't always use the class name you'd
+                    // expect. So: one-time full dump of every distinct
+                    // class name present, plus every clickable node
+                    // regardless of class, so we can see the bubble's
+                    // REAL class instead of guessing again. Fires once,
+                    // ~4s in, not every 2s cycle (would flood the log).
+                    if (!hasDumpedFullMediaTree && elapsed > 4000L) {
+                        hasDumpedFullMediaTree = true
+                        dumpFullNodeTree(root)
+                    }
                     val bubble = findBottommostImageNode(root)
                     if (bubble != null) {
                         Log.i(TAG, "Found media bubble - tapping to force download")
@@ -757,6 +778,69 @@ class WaSendAccessibilityService : AccessibilityService() {
 
         visit(root)
         return best
+    }
+
+    /**
+     * DIAGNOSTIC (21.8.2026): one-time full-tree dump used when the
+     * ImageView-class search comes up empty for the actual photo bubble
+     * (imgCount flat across the whole timeout on-device). Logs:
+     *  1) a class-name histogram (top 8) - to see what class the bubble
+     *     actually reports itself as, since it's clearly not ImageView
+     *  2) every clickable node regardless of class, top-to-bottom, with
+     *     class/text/desc/id/bounds - the real photo bubble should stand
+     *     out by content-description (often includes "תמונה"/"photo")
+     *     or by being roughly centered horizontally in the message list
+     *     area rather than pinned to a screen edge like toolbar icons.
+     * Capped output (8 classes, 15 clickable nodes) to avoid flooding
+     * the ring buffer.
+     */
+    private fun dumpFullNodeTree(root: AccessibilityNodeInfo) {
+        try {
+            val classCounts = HashMap<String, Int>()
+            data class ClickableInfo(
+                val cls: String, val text: String, val desc: String,
+                val id: String, val rect: Rect
+            )
+            val clickables = mutableListOf<ClickableInfo>()
+
+            fun visit(node: AccessibilityNodeInfo) {
+                val cls = node.className?.toString() ?: "(null)"
+                classCounts[cls] = (classCounts[cls] ?: 0) + 1
+                if (node.isClickable) {
+                    val r = Rect()
+                    node.getBoundsInScreen(r)
+                    clickables.add(
+                        ClickableInfo(
+                            cls,
+                            node.text?.toString() ?: "",
+                            node.contentDescription?.toString() ?: "",
+                            node.viewIdResourceName ?: "",
+                            r
+                        )
+                    )
+                }
+                for (i in 0 until node.childCount) {
+                    val child = node.getChild(i) ?: continue
+                    visit(child)
+                }
+            }
+            visit(root)
+
+            EventLog.log("A11y-MediaDownload: 🌳 אבחון מלא - היסטוגרמת classes (8 המובילים מתוך ${classCounts.size} סוגים שונים):")
+            classCounts.entries.sortedByDescending { it.value }.take(8).forEach { (cls, count) ->
+                EventLog.log("A11y-MediaDownload: 🌳   $count× $cls")
+            }
+
+            EventLog.log("A11y-MediaDownload: 🌳 אבחון מלא - ${clickables.size} nodes לחיצים סה\"כ, עד 15 (מסודר לפי מיקום אנכי):")
+            clickables.sortedBy { it.rect.top }.take(15).forEach { c ->
+                EventLog.log(
+                    "A11y-MediaDownload: 🌳   class=${c.cls} text='${c.text}' " +
+                        "desc='${c.desc}' id='${c.id}' bounds=${c.rect}"
+                )
+            }
+        } catch (e: Exception) {
+            EventLog.log("A11y-MediaDownload: 🌳 אבחון מלא נכשל: ${e.javaClass.simpleName}: ${e.message}")
+        }
     }
 
     /**
