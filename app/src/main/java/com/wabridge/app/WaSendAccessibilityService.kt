@@ -129,6 +129,7 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var scrolledToLatestMessage = false
     private var hasDumpedFullMediaTree = false
     private var hasDumpedPostTapTree = false
+    private var hasDumpedMenuTree = false
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -190,6 +191,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             scrolledToLatestMessage = false
             hasDumpedFullMediaTree = false
             hasDumpedPostTapTree = false
+            hasDumpedMenuTree = false
             saveMenuAttemptStep = 0
             lastMediaDownloadDumpTime = 0L
             handler.post(mediaDownloadRunnable)
@@ -805,9 +807,31 @@ class WaSendAccessibilityService : AccessibilityService() {
                             saveMenuAttemptStep = 2
                         }
                     } else if (saveMenuAttemptStep == 1) {
+                        // DIAGNOSTIC (22.8.2026): the previous attempt
+                        // DID find and tap something matching the save
+                        // regex, but logged text='null' - the regex
+                        // search climbs from the matching descendant up
+                        // to its nearest clickable ANCESTOR (a common
+                        // pattern: a menu row is a plain clickable
+                        // container wrapping a separate TextView with
+                        // the actual label), so the container itself
+                        // legitimately has no text of its own to log.
+                        // That means we genuinely don't know what got
+                        // tapped, and 9+ more seconds of polling
+                        // afterward still found nothing new. Dump the
+                        // OPEN menu's full tree first (one-time, reusing
+                        // FIX46's dumpFullNodeTree) so we can see the
+                        // real item labels with our own eyes instead of
+                        // guessing at broader/narrower regexes blind.
+                        if (!hasDumpedMenuTree) {
+                            hasDumpedMenuTree = true
+                            EventLog.log("A11y-MediaDownload: 🌳 אבחון תפריט \"More options\" (פתוח כרגע):")
+                            dumpFullNodeTree(root)
+                        }
+                        val matchedText = findDescendantTextMatchingRegex(root, SAVE_TO_GALLERY_REGEX)
                         val saveItem = findClickableMatchingRegex(root, SAVE_TO_GALLERY_REGEX)
                         if (saveItem != null) {
-                            EventLog.log("A11y-MediaDownload: 💾 נמצא פריט תפריט '${saveItem.text ?: saveItem.contentDescription}' - לוחץ")
+                            EventLog.log("A11y-MediaDownload: 💾 נמצא פריט תפריט תואם טקסט '$matchedText' - לוחץ")
                             saveItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                         } else {
                             EventLog.log("A11y-MediaDownload: ⚠️ תפריט \"More options\" נפתח אך לא נמצא בו פריט שמירה - סוגר")
@@ -1082,6 +1106,18 @@ class WaSendAccessibilityService : AccessibilityService() {
      * where "Invite via link" reliably sits near the top regardless of
      * member count.
      */
+    /** Like findClickableMatchingRegex but returns the matched TEXT itself (from wherever it actually matched), not the clickable ancestor - useful for logging what a click actually targeted when the clickable container has no text of its own. */
+    private fun findDescendantTextMatchingRegex(node: AccessibilityNodeInfo, regex: Regex): String? {
+        val text = node.text?.toString() ?: node.contentDescription?.toString()
+        if (text != null && regex.containsMatchIn(text)) return text
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findDescendantTextMatchingRegex(child, regex)
+            if (found != null) return found
+        }
+        return null
+    }
+
     private fun findClickableMatchingRegex(node: AccessibilityNodeInfo, regex: Regex): AccessibilityNodeInfo? {
         val text = node.text?.toString() ?: node.contentDescription?.toString()
         if (text != null && regex.containsMatchIn(text)) {

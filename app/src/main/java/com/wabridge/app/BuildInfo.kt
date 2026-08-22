@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX51-save-to-gallery-overflow-menu-2026-08-22"
+    const val BUILD_TAG = "FIX52-dump-open-overflow-menu-2026-08-22"
 }
