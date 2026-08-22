@@ -59,17 +59,61 @@ class MainActivity : AppCompatActivity() {
             // Truncate defensively before copying so this can never
             // crash the whole app again, regardless of how large the
             // in-memory log ever grows.
-            val fullLogText = EventLog.getAll()
-            val maxChars = 200_000
-            val logText = if (fullLogText.length > maxChars) {
-                "... (היומן קוצר - מוצגים ${maxChars} התווים האחרונים מתוך ${fullLogText.length}) ...\n" +
-                    fullLogText.takeLast(maxChars)
-            } else {
-                fullLogText
+            val logText = truncatedLogText()
+            // FIX (21.8.2026): this used to always show a "copied!"
+            // success toast unconditionally, even though the user
+            // reported copy silently not working (confirmed - some
+            // emulator/OEM clipboard implementations accept the call
+            // without throwing but never actually populate the system
+            // clipboard, e.g. some NoxPlayer builds). Now verifies by
+            // reading the clip straight back before claiming success,
+            // and wraps the whole thing in try/catch in case the
+            // ClipboardManager call itself throws (also seen on some
+            // devices). If verification fails, tells the user honestly
+            // and points them at the two fallbacks added the same date:
+            // long-press-to-select on the log text itself (now
+            // textIsSelectable), or the new "שתף" share button.
+            try {
+                val clipboard = getSystemService(ClipboardManager::class.java)
+                clipboard.setPrimaryClip(ClipData.newPlainText("WA Bridge log", logText))
+                val readBack = clipboard.primaryClip
+                    ?.takeIf { it.itemCount > 0 }
+                    ?.getItemAt(0)?.text?.toString()
+                if (readBack == logText) {
+                    Toast.makeText(this, "היומן הועתק - אפשר להדביק בהודעה", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(
+                        this,
+                        "ההעתקה לא הצליחה במכשיר הזה - נסה את כפתור \"שתף\" 📤 או לחיצה ארוכה על הטקסט למטה",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(
+                    this,
+                    "ההעתקה נכשלה (${e.javaClass.simpleName}) - נסה את כפתור \"שתף\" 📤 או לחיצה ארוכה על הטקסט למטה",
+                    Toast.LENGTH_LONG
+                ).show()
             }
-            val clipboard = getSystemService(ClipboardManager::class.java)
-            clipboard.setPrimaryClip(ClipData.newPlainText("WA Bridge log", logText))
-            Toast.makeText(this, "היומן הועתק - אפשר להדביק בהודעה", Toast.LENGTH_SHORT).show()
+        }
+
+        findViewById<Button>(R.id.btnShareLog).setOnClickListener {
+            // FIX (21.8.2026): clipboard-independent fallback - routes
+            // the log text through Android's normal share sheet instead
+            // (email, WhatsApp itself, Notes, Drive, etc.), so a broken
+            // clipboard on this specific device/emulator doesn't block
+            // getting logs out at all.
+            val logText = truncatedLogText()
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, logText)
+                putExtra(Intent.EXTRA_SUBJECT, "WA Bridge log")
+            }
+            try {
+                startActivity(Intent.createChooser(sendIntent, "שתף את היומן"))
+            } catch (e: Exception) {
+                Toast.makeText(this, "השיתוף נכשל: ${e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+            }
         }
 
         val lastCrash = WaBridgeApplication.getLastCrash(this)
@@ -173,6 +217,17 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         updateStatus()
         uiHandler.post(logRefreshRunnable)
+    }
+
+    private fun truncatedLogText(): String {
+        val fullLogText = EventLog.getAll()
+        val maxChars = 200_000
+        return if (fullLogText.length > maxChars) {
+            "... (היומן קוצר - מוצגים ${maxChars} התווים האחרונים מתוך ${fullLogText.length}) ...\n" +
+                fullLogText.takeLast(maxChars)
+        } else {
+            fullLogText
+        }
     }
 
     override fun onPause() {

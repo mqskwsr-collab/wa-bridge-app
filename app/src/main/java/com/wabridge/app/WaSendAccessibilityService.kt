@@ -110,6 +110,7 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var lastMediaDownloadDumpTime = 0L
     private var scrolledToLatestMessage = false
     private var hasDumpedFullMediaTree = false
+    private var hasDumpedPostTapTree = false
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -170,6 +171,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             mediaDownloadStage = -1
             scrolledToLatestMessage = false
             hasDumpedFullMediaTree = false
+            hasDumpedPostTapTree = false
             lastMediaDownloadDumpTime = 0L
             handler.post(mediaDownloadRunnable)
         }
@@ -739,6 +741,29 @@ class WaSendAccessibilityService : AccessibilityService() {
                     }
                 }
                 1 -> {
+                    // DIAGNOSTIC (21.8.2026): on-device log (21.8 13:01)
+                    // showed the correct bubble tapped, 12s of active
+                    // polling, and STILL zero new files - meanwhile the
+                    // 5 newest files in the folder were all HOURS old
+                    // (deltas of 21222s/55523s/etc from the notification
+                    // time), meaning no new file was written at all
+                    // during the whole wait. That raises a real
+                    // possibility that 'הגדלת התמונה' ("enlarge the
+                    // image") is just a pinch-zoom on the EXISTING
+                    // thumbnail bitmap in place, not a navigation to
+                    // WhatsApp's actual full-screen media-viewer Activity
+                    // that would trigger a real download. One-time full
+                    // tree dump right after the tap (reusing FIX46's
+                    // dumpFullNodeTree) shows exactly what's on screen
+                    // now, so we can tell whether a new screen actually
+                    // opened (different node structure/back button/etc.)
+                    // or whether we're still looking at the same chat
+                    // screen with nothing new.
+                    if (!hasDumpedPostTapTree) {
+                        hasDumpedPostTapTree = true
+                        EventLog.log("A11y-MediaDownload: 🌳 אבחון מסך אחרי הלחיצה (מיד):")
+                        dumpFullNodeTree(root)
+                    }
                     // FIX (21.8.2026): was a blind fixed 3s wait then
                     // unconditional "back" - on-device log (21.8 10:25)
                     // showed the CORRECT bubble now gets tapped (desc=
