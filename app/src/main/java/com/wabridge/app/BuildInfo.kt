@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX50-log-share-fallback-and-post-tap-dump-2026-08-21"
+    const val BUILD_TAG = "FIX51-save-to-gallery-overflow-menu-2026-08-22"
 }

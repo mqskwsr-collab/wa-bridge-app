@@ -74,7 +74,25 @@ class WaSendAccessibilityService : AccessibilityService() {
         // also handles VIDEO; safe to leave in even if never confirmed,
         // since it only narrows what counts as a match.
         private val MEDIA_BUBBLE_DESC_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image|play video|הפעלת הסרטון)""", RegexOption.IGNORE_CASE)
+        // FIX (22.8.2026): the post-tap tree dump (see FIX50) confirmed
+        // a REAL screen navigation happens (back/star/forward/edit/more-
+        // options icons, reaction row - genuinely WhatsApp's full-screen
+        // media viewer, not just an inline zoom). But its top bar has NO
+        // visible save/download icon - only "More options" (⋮, English
+        // label despite the rest of the UI being Hebrew, per the
+        // on-device dump). On current WhatsApp, "Save to gallery" lives
+        // INSIDE that overflow menu, not as a top-level icon - we were
+        // opening the viewer correctly but never actually triggering the
+        // save action, which is exactly why polling for the file always
+        // timed out even with the correct screen open.
+        private val MORE_OPTIONS_DESC_REGEX = Regex("""(more options|options menu|אפשרויות נוספות|עוד אפשרויות)""", RegexOption.IGNORE_CASE)
+        private val SAVE_TO_GALLERY_REGEX = Regex("""(save to gallery|save|download|שמירה בגלריה|שמור בגלריה|שמירה|הורדה)""", RegexOption.IGNORE_CASE)
     }
+
+    // 0=not attempted, 1=tapped "More options", waiting for menu, 2=done
+    // (either tapped a save item, or gave up after one attempt - either
+    // way only tried once per download job).
+    private var saveMenuAttemptStep = 0
 
     private val handler = Handler(Looper.getMainLooper())
     private var searching = false
@@ -172,6 +190,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             scrolledToLatestMessage = false
             hasDumpedFullMediaTree = false
             hasDumpedPostTapTree = false
+            saveMenuAttemptStep = 0
             lastMediaDownloadDumpTime = 0L
             handler.post(mediaDownloadRunnable)
         }
@@ -763,6 +782,40 @@ class WaSendAccessibilityService : AccessibilityService() {
                         hasDumpedPostTapTree = true
                         EventLog.log("A11y-MediaDownload: 🌳 אבחון מסך אחרי הלחיצה (מיד):")
                         dumpFullNodeTree(root)
+                    }
+                    // FIX (22.8.2026): the post-tap dump confirmed a real
+                    // viewer screen opens, but its top bar has no visible
+                    // save/download icon - only "More options" (⋮). This
+                    // taps that overflow menu once, looks for a save/
+                    // gallery-ish menu item, and taps it - THIS is what
+                    // actually triggers writing the file to public
+                    // storage, which is why polling below always timed
+                    // out before this existed even with the correct
+                    // screen genuinely open.
+                    if (saveMenuAttemptStep == 0) {
+                        val moreOptions = findClickableMatchingRegex(root, MORE_OPTIONS_DESC_REGEX)
+                        if (moreOptions != null) {
+                            EventLog.log("A11y-MediaDownload: ⋮ לוחץ על \"More options\" כדי לחפש אפשרות שמירה")
+                            moreOptions.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            saveMenuAttemptStep = 1
+                            handler.postDelayed(this, 700L)
+                            return
+                        } else {
+                            EventLog.log("A11y-MediaDownload: ⚠️ לא נמצא כפתור \"More options\" - מדלג ישר להמתנה")
+                            saveMenuAttemptStep = 2
+                        }
+                    } else if (saveMenuAttemptStep == 1) {
+                        val saveItem = findClickableMatchingRegex(root, SAVE_TO_GALLERY_REGEX)
+                        if (saveItem != null) {
+                            EventLog.log("A11y-MediaDownload: 💾 נמצא פריט תפריט '${saveItem.text ?: saveItem.contentDescription}' - לוחץ")
+                            saveItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        } else {
+                            EventLog.log("A11y-MediaDownload: ⚠️ תפריט \"More options\" נפתח אך לא נמצא בו פריט שמירה - סוגר")
+                            performGlobalAction(GLOBAL_ACTION_BACK)
+                        }
+                        saveMenuAttemptStep = 2
+                        handler.postDelayed(this, 700L)
+                        return
                     }
                     // FIX (21.8.2026): was a blind fixed 3s wait then
                     // unconditional "back" - on-device log (21.8 10:25)
