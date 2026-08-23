@@ -86,6 +86,50 @@ object WaMediaLocator {
 
     data class FoundMedia(val file: File, val mimeType: String)
 
+    /**
+     * FIX (23.8.2026, multi-media): same matching strategy as
+     * findRecentMediaFile (newest files within the time window, via
+     * MediaStore first), but returns UP TO [maxCount] distinct files
+     * instead of just the single newest one - needed for albums (e.g.
+     * "2 תמונות" / "5 photos"). [excludePaths] lets the caller skip
+     * files that were already located/sent for an earlier, near-
+     * duplicate notification of the very same album (see
+     * WaNotificationListener's sent-file tracking) so the same image
+     * is never attached twice while genuinely different images in the
+     * same album are still picked up.
+     *
+     * KNOWN LIMITATION: this only finds files WhatsApp (or a prior
+     * "force download" tap) already wrote to disk/MediaStore. If Media
+     * Auto-Download is off and none of the album's images have been
+     * opened/downloaded yet, this can only ever return the single image
+     * that the force-download automation (MediaDownloadLearner) opened -
+     * that automation currently taps ONE bubble, it does not yet swipe
+     * through the full-screen album viewer to force-download every item.
+     * See MediaDownloadLearner's doc comment for that follow-up.
+     */
+    fun findRecentMediaFiles(
+        context: Context,
+        type: MediaClassifier.MediaType,
+        notificationTimeMs: Long,
+        maxCount: Int,
+        matchWindowMs: Long = MATCH_WINDOW_MS,
+        excludePaths: Set<String> = emptySet()
+    ): List<FoundMedia> {
+        if (type == MediaClassifier.MediaType.NONE || maxCount <= 0) return emptyList()
+        if (!isAvailable(context)) return emptyList()
+
+        // Voice notes are frequently not MediaStore-indexed (see
+        // findViaMediaStore's doc comment) - for that type, the best we
+        // can do without a bigger rewrite of the folder-scan fallback is
+        // the single-file path, so just wrap that.
+        if (type == MediaClassifier.MediaType.VOICE_NOTE) {
+            val single = findRecentMediaFile(context, type, notificationTimeMs, matchWindowMs)
+            return if (single != null && single.file.absolutePath !in excludePaths) listOf(single) else emptyList()
+        }
+
+        return findMultipleViaMediaStore(context, type, notificationTimeMs, matchWindowMs, maxCount, excludePaths)
+    }
+
     fun isAvailable(context: Context): Boolean {
         // FIX (21.8.2026): was hardcoded `true` below API 30 with the
         // reasoning "permission concept doesn't exist pre-Android 11" -
@@ -286,6 +330,69 @@ object WaMediaLocator {
             EventLog.log("Media: 🔎 שאילתת MediaStore נכשלה: ${e.javaClass.simpleName}: ${e.message}")
         }
         return null
+    }
+
+    /**
+     * Same query as findViaMediaStore but without LIMIT 1 semantics -
+     * walks the whole (small, time-windowed) result set and collects up
+     * to [maxCount] distinct files, skipping [excludePaths]. See
+     * findRecentMediaFiles's doc comment for the album use case this
+     * exists for.
+     */
+    private fun findMultipleViaMediaStore(
+        context: Context,
+        type: MediaClassifier.MediaType,
+        notificationTimeMs: Long,
+        matchWindowMs: Long,
+        maxCount: Int,
+        excludePaths: Set<String>
+    ): List<FoundMedia> {
+        val collection = when (type) {
+            MediaClassifier.MediaType.IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            MediaClassifier.MediaType.VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            else -> return emptyList()
+        }
+
+        val windowSec = matchWindowMs / 1000
+        val notificationSec = notificationTimeMs / 1000
+        val minSec = notificationSec - windowSec
+        val maxSec = notificationSec + windowSec
+
+        val projection = arrayOf(
+            MediaStore.MediaColumns.DATA,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.DATE_ADDED
+        )
+        val selection = "${MediaStore.MediaColumns.DATE_ADDED} BETWEEN ? AND ?"
+        val selectionArgs = arrayOf(minSec.toString(), maxSec.toString())
+        val sortOrder = "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+
+        val results = mutableListOf<FoundMedia>()
+        try {
+            val cursor: Cursor? = context.contentResolver.query(
+                collection, projection, selection, selectionArgs, sortOrder
+            )
+            cursor?.use {
+                val dataCol = it.getColumnIndex(MediaStore.MediaColumns.DATA)
+                val nameCol = it.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                while (it.moveToNext() && results.size < maxCount) {
+                    val path = if (dataCol >= 0) it.getString(dataCol) else null
+                    val name = if (nameCol >= 0) it.getString(nameCol) else null
+                    if (path == null || path in excludePaths) continue
+                    val file = File(path)
+                    if (!file.isFile) continue
+                    results.add(FoundMedia(file, guessMimeType(file.name)))
+                    EventLog.log("Media: ✅ נמצא קובץ נוסף דרך MediaStore (${results.size}/$maxCount): ${name ?: file.name}")
+                }
+            }
+            if (results.isEmpty()) {
+                EventLog.log("Media: 🔎 אבחון - שאילתת MediaStore (ריבוי) לא מצאה תוצאה בחלון הזמן (${minSec}-${maxSec})")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaStore multi-query failed", e)
+            EventLog.log("Media: 🔎 שאילתת MediaStore (ריבוי) נכשלה: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        return results
     }
 
     private fun guessMimeType(fileName: String): String {

@@ -44,4 +44,31 @@ object MediaClassifier {
         if (IMAGE_MARKERS.any { text.contains(it, ignoreCase = true) }) return MediaType.IMAGE
         return MediaType.NONE
     }
+
+    // FIX (23.8.2026, multi-media): WhatsApp's own summary notification
+    // text tells us how many items are in the album ("2 תמונות" / "2
+    // photos" / "5 פריטי מדיה"), or explicitly says "one" ("תמונה אחת
+    // (1)"). Parsing this lets the caller know it should try to fetch
+    // more than a single file instead of silently dropping the rest of
+    // the album. Deliberately conservative: falls back to 1 (the
+    // existing, known-working behaviour) whenever nothing is parseable,
+    // rather than guessing.
+    private val EXPLICIT_SINGLE_MARKERS = listOf("אחת", "אחד", "one")
+    private val DIGIT_REGEX = Regex("""\d+""")
+
+    fun extractCount(rawText: String): Int {
+        val text = Utils.stripBidiMarks(rawText).trim()
+        if (text.isEmpty()) return 1
+
+        // "תמונה אחת (1)" - prefer the parenthesised digit if present,
+        // since it's unambiguous; otherwise fall back to the Hebrew/
+        // English word for "one".
+        val match = DIGIT_REGEX.find(text)
+        if (match != null) {
+            val n = match.value.toIntOrNull() ?: 1
+            return if (n in 1..50) n else 1 // sanity cap - never trust an absurd parsed count
+        }
+        if (EXPLICIT_SINGLE_MARKERS.any { text.contains(it, ignoreCase = true) }) return 1
+        return 1
+    }
 }

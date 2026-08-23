@@ -50,6 +50,68 @@ class WaNotificationListener : NotificationListenerService() {
         private var lastTimestamp: Long = 0L
         private const val DEDUPE_WINDOW_MS = 3000L
 
+        // FIX (23.8.2026, multi-media): the text-based dedupe above keys
+        // on canonicalTarget+canonicalMessage, but WhatsApp posts SEVERAL
+        // notifications with genuinely different text for the exact same
+        // incoming album/message - e.g. 'תמונה אחת (1)', then '2 תמונות',
+        // then '2 הודעות חדשות' all within ~1 second of each other for one
+        // real message. Each of those different texts defeats the text
+        // dedupe above and re-runs the full media locate/force-download/
+        // attach pipeline independently, which is what caused the same
+        // file to be attached and POSTed up to 4 times for a single
+        // incoming album (confirmed in EventLog from a real device). This
+        // second, WIDER dedupe is keyed only on target+mediaType (ignoring
+        // the specific wording) and skips re-running media attachment
+        // for near-simultaneous notifications about what's almost
+        // certainly the same underlying media event. The plain-text POST
+        // itself still goes out for every notification variant exactly as
+        // before - only the (expensive, and duplicate-prone) media lookup
+        // is skipped on repeats.
+        private var lastMediaEventKey: String? = null
+        private var lastMediaEventTimestamp: Long = 0L
+        private const val MEDIA_EVENT_DEDUPE_WINDOW_MS = 6000L
+
+        // FIX (23.8.2026, multi-media): belt-and-suspenders against the
+        // dedupe above ever missing a case - remembers the absolute file
+        // paths of media already attached+sent recently, so the exact
+        // same physical file can never be attached twice even if two
+        // independent media events both resolve to it (e.g. WaMediaLocator
+        // picking "the newest file" for two different notifications that
+        // both landed after only one new file had actually arrived).
+        // Expires entries older than SENT_FILE_MEMORY_MS on each check so
+        // this can't grow unbounded or block a genuinely-resent file hours
+        // later.
+        private val recentlySentFiles = LinkedHashMap<String, Long>()
+        private const val SENT_FILE_MEMORY_MS = 60_000L
+
+        @Synchronized
+        private fun wasRecentlySent(path: String, now: Long): Boolean {
+            recentlySentFiles.entries.removeAll { now - it.value > SENT_FILE_MEMORY_MS }
+            return recentlySentFiles.containsKey(path)
+        }
+
+        @Synchronized
+        private fun markSent(path: String, now: Long) {
+            recentlySentFiles[path] = now
+        }
+
+        /**
+         * Atomically checks whether [key] (target+mediaType) was already
+         * processed within MEDIA_EVENT_DEDUPE_WINDOW_MS and, if not,
+         * records [now] as the new "last processed" time for it. Kept as
+         * a single synchronized check-and-set (rather than separate
+         * read/write calls from attachMediaIfAny) to avoid a race between
+         * two notifications handled on the same single-thread executor in
+         * quick succession.
+         */
+        @Synchronized
+        private fun shouldSkipMediaEvent(key: String, now: Long): Boolean {
+            val skip = key == lastMediaEventKey && (now - lastMediaEventTimestamp) < MEDIA_EVENT_DEDUPE_WINDOW_MS
+            lastMediaEventKey = key
+            lastMediaEventTimestamp = now
+            return skip
+        }
+
         // FIX (19.8.2026) - media support, phase 1 (inbound only). Raw
         // file size cap before base64 (which inflates size by ~33%) -
         // keeps the encoded payload comfortably under both Apps Script's
@@ -307,10 +369,29 @@ class WaNotificationListener : NotificationListenerService() {
             val mediaType = MediaClassifier.classify(text)
             if (mediaType == MediaClassifier.MediaType.NONE) return
 
-            EventLog.log("Listener: 🖼️ הודעה מסווגת כמדיה (${mediaType.name}) - מחפש קובץ...")
-            var found = WaMediaLocator.findRecentMediaFile(this, mediaType, postTimeMs)
+            val now = System.currentTimeMillis()
+            val mediaEventKey = "$target|${mediaType.name}"
 
-            if (found == null) {
+            // FIX (23.8.2026, multi-media): skip the (expensive, and -
+            // for albums - duplicate-prone) locate/force-download/attach
+            // pipeline entirely if a media notification for this exact
+            // target+type was already processed moments ago. See the
+            // companion doc comment on lastMediaEventKey for the real
+            // multi-notification scenario this guards against.
+            if (shouldSkipMediaEvent(mediaEventKey, now)) {
+                EventLog.log("Listener: ⏭️ מדלג על צירוף מדיה - אותו אירוע מדיה (${mediaType.name}) עבור '$target' כבר טופל לפני פחות מ-${MEDIA_EVENT_DEDUPE_WINDOW_MS}ms")
+                return
+            }
+
+            // FIX (23.8.2026, multi-media): parse how many items WhatsApp
+            // itself says this message/album contains ("2 תמונות" etc.)
+            // so an album isn't silently truncated to a single photo.
+            val count = MediaClassifier.extractCount(text)
+            EventLog.log("Listener: 🖼️ הודעה מסווגת כמדיה (${mediaType.name}, כמות מזוהה: $count) - מחפש קבצים...")
+
+            var found = WaMediaLocator.findRecentMediaFiles(this, mediaType, postTimeMs, maxCount = count)
+
+            if (found.isEmpty()) {
                 // FIX (20.8.2026): the file wasn't on disk at all (not a
                 // timing/path issue - confirmed via diagnostics that the
                 // correct folder exists but is completely empty), most
@@ -319,30 +400,83 @@ class WaNotificationListener : NotificationListenerService() {
                 // full-quality original by opening the chat and tapping
                 // the media bubble, then re-scan with a wider window
                 // covering however long that automation took.
+                //
+                // NOTE: this force-download tap currently only opens ONE
+                // media item, so for an album (count > 1) with nothing
+                // pre-downloaded, this can still only recover a single
+                // image - see MediaDownloadLearner's doc comment. It is
+                // NOT a regression versus before this fix; it's the same
+                // single-image best-effort as always, just no longer
+                // duplicated across notification variants.
                 val triggerStart = System.currentTimeMillis()
                 val triggered = MediaDownloadLearner.triggerDownloadAndWait(this, target, mediaType, contentIntent)
                 if (triggered) {
                     val elapsedSinceTrigger = System.currentTimeMillis() - triggerStart
-                    found = WaMediaLocator.findRecentMediaFile(this, mediaType, System.currentTimeMillis(), matchWindowMs = elapsedSinceTrigger + 5000L)
+                    found = WaMediaLocator.findRecentMediaFiles(
+                        this, mediaType, System.currentTimeMillis(),
+                        maxCount = count, matchWindowMs = elapsedSinceTrigger + 5000L
+                    )
                 }
             }
 
-            found ?: return
+            if (found.isEmpty()) return
 
-            if (found.file.length() > MEDIA_SIZE_CAP_BYTES) {
-                val mb = found.file.length() / (1024 * 1024)
-                Log.w(TAG, "Media file too large to attach: ${found.file.name} (${mb}MB)")
-                EventLog.log("Listener: ⚠️ קובץ המדיה גדול מדי לצירוף אוטומטי (${mb}MB) - נשלח כטקסט בלבד")
-                return
+            // Filter out anything we've already attached+sent very
+            // recently (belt-and-suspenders against the event-level
+            // dedupe above missing a case - see recentlySentFiles doc
+            // comment) and anything over the size cap.
+            val usable = found.filter { fm ->
+                val path = fm.file.absolutePath
+                when {
+                    wasRecentlySent(path, now) -> {
+                        EventLog.log("Listener: ⏭️ מדלג - קובץ זה כבר נשלח לאחרונה: ${fm.file.name}")
+                        false
+                    }
+                    fm.file.length() > MEDIA_SIZE_CAP_BYTES -> {
+                        val mb = fm.file.length() / (1024 * 1024)
+                        Log.w(TAG, "Media file too large to attach: ${fm.file.name} (${mb}MB)")
+                        EventLog.log("Listener: ⚠️ קובץ המדיה גדול מדי לצירוף אוטומטי (${mb}MB) - מדלג")
+                        false
+                    }
+                    else -> true
+                }
+            }
+            if (usable.isEmpty()) return
+
+            if (count > usable.size) {
+                EventLog.log("Listener: ℹ️ זוהו $count פריטים בהודעה אך נמצאו/נשלחו רק ${usable.size} - יתר הפריטים באלבום לא הצליחו להתאתר (מגבלה ידועה, ראו תיעוד ב-WaMediaLocator)")
             }
 
-            val bytes = found.file.readBytes()
-            val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-            body.put("mediaBase64", base64)
-            body.put("mediaMimeType", found.mimeType)
-            body.put("mediaFileName", found.file.name)
-            Log.i(TAG, "Attaching media: ${found.file.name} (${bytes.size} bytes, ${found.mimeType})")
-            EventLog.log("Listener: 📎 מצרף קובץ מדיה: ${found.file.name} (${bytes.size / 1024}KB)")
+            // Backward compatible: keep the original single-file fields
+            // populated with the first item, so a Code.gs backend that
+            // hasn't been updated yet still gets exactly the behaviour it
+            // had before this fix (one image, no crash/regression).
+            // ADDITIONALLY (new): a "mediaItems" array with every item
+            // found, for a backend updated to loop over it and forward
+            // them all. Code.gs needs a matching update to actually make
+            // use of anything beyond the first item - see handoff notes.
+            val itemsJson = org.json.JSONArray()
+            usable.forEachIndexed { idx, fm ->
+                val bytes = fm.file.readBytes()
+                val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                val item = JSONObject().apply {
+                    put("mediaBase64", base64)
+                    put("mediaMimeType", fm.mimeType)
+                    put("mediaFileName", fm.file.name)
+                }
+                itemsJson.put(item)
+                markSent(fm.file.absolutePath, now)
+
+                if (idx == 0) {
+                    body.put("mediaBase64", base64)
+                    body.put("mediaMimeType", fm.mimeType)
+                    body.put("mediaFileName", fm.file.name)
+                }
+                Log.i(TAG, "Attaching media (${idx + 1}/${usable.size}): ${fm.file.name} (${bytes.size} bytes, ${fm.mimeType})")
+                EventLog.log("Listener: 📎 מצרף קובץ מדיה (${idx + 1}/${usable.size}): ${fm.file.name} (${bytes.size / 1024}KB)")
+            }
+            body.put("mediaItems", itemsJson)
+            body.put("mediaItemCount", usable.size)
         } catch (e: Exception) {
             // Deliberately swallow - see doc comment above. A media
             // lookup/read failure must never prevent the plain-text
