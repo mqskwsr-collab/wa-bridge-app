@@ -24,10 +24,33 @@ object MediaDownloadCoordinator {
 
     @Volatile private var resultCallback: ((Result) -> Unit)? = null
 
+    // FIX (23.8.2026, album-size mismatch): the media bubble WhatsApp
+    // shows in the chat frequently carries its OWN true album size in
+    // its accessibility content-description (e.g. "הצגת כל 5 פריטי
+    // המדיה" / "showing all 5 media items") - confirmed on a real
+    // device to be accurate (5) even when the triggering notification's
+    // own text said only "תמונה אחת (1)" and so MediaClassifier.
+    // extractCount() undercounted to 1, capping the whole find/attach
+    // pipeline at a single file despite a real 5-photo album. Set by
+    // WaSendAccessibilityService right before it taps the bubble; read
+    // by WaNotificationListener.attachMediaIfAny afterwards so it can
+    // widen its post-download re-scan to the real count instead of
+    // trusting the notification text alone. Cleared on every new
+    // startDownload so a stale value from a previous, unrelated album
+    // can never leak into an unrelated later message.
+    @Volatile var lastDetectedAlbumSize: Int? = null
+        private set
+
+    @Synchronized
+    fun reportDetectedAlbumSize(size: Int) {
+        lastDetectedAlbumSize = size
+    }
+
     @Synchronized
     fun startDownload(job: PendingDownload, onResult: (Result) -> Unit) {
         current = job
         resultCallback = onResult
+        lastDetectedAlbumSize = null
     }
 
     @Synchronized

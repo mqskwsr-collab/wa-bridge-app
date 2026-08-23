@@ -90,6 +90,12 @@ class WaSendAccessibilityService : AccessibilityService() {
         // scroll-to-bottom fix, in case that doesn't fully resolve it on
         // some device/WhatsApp version.
         private val NON_MEDIA_ICON_DESC_REGEX = Regex("""(עבור אל ההודעה האחרונה|עבור להודעה האחרונה|scroll to (the )?last message|go to last message|more options|options menu|camera|attach|voice message|emoji|search|send)""", RegexOption.IGNORE_CASE)
+        // FIX (23.8.2026, album-size mismatch): matches WhatsApp's "show
+        // all N media items" bubble description in Hebrew/English, to
+        // recover the true album size when the triggering notification's
+        // own text undercounted it. See MediaDownloadCoordinator's
+        // lastDetectedAlbumSize doc comment for the full story.
+        private val ALBUM_SIZE_IN_DESC_REGEX = Regex("""(?:הצגת כל|showing all|view all)\s*(\d+)\s*(?:פריטי\s*(?:ה)?מדיה|media items?)""", RegexOption.IGNORE_CASE)
         // FIX (21.8.2026): the FULL on-device tree dump (see FIX46)
         // revealed the real culprit for why imgCount stayed flat at 2
         // the whole timeout - the photo bubble is classed as
@@ -794,6 +800,20 @@ class WaSendAccessibilityService : AccessibilityService() {
                         // nodes clustered at the very bottom of the
                         // screen, likely ABOVE the actual photo bubble.
                         logImageNodeCandidates(root)
+                        // FIX (23.8.2026, album-size mismatch): the bubble's
+                        // own content-description sometimes states the
+                        // REAL album size ("הצגת כל 5 פריטי המדיה" /
+                        // "showing all 5 media items"), which is more
+                        // trustworthy than the triggering notification's
+                        // text (which can say "one photo (1)" for the
+                        // first-arriving item of a larger album). Grab it
+                        // here, before the tap, so attachMediaIfAny can
+                        // widen its search instead of stopping at 1.
+                        val descText = bubble.contentDescription?.toString() ?: ""
+                        ALBUM_SIZE_IN_DESC_REGEX.find(descText)?.groupValues?.get(1)?.toIntOrNull()?.let { n ->
+                            EventLog.log("A11y-MediaDownload: 🔢 גודל אלבום אמיתי זוהה מתוך תיאור הבועה: $n")
+                            MediaDownloadCoordinator.reportDetectedAlbumSize(n)
+                        }
                         EventLog.log("A11y-MediaDownload: נמצאה בועת מדיה, לוחץ לפתיחה (הכרחת הורדה)")
                         bubble.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                         mediaDownloadStage = 1
@@ -915,20 +935,37 @@ class WaSendAccessibilityService : AccessibilityService() {
                     // a false SUCCESS, so the caller knows not to trust a
                     // rescan blindly.
                     val elapsedSinceTap = System.currentTimeMillis() - mediaTapTime
-                    val found = WaMediaLocator.findRecentMediaFile(
+                    // FIX (23.8.2026, album-size mismatch): previously
+                    // backed out the INSTANT a single file appeared,
+                    // which - now that we tap knowing the real album size
+                    // up front (see ALBUM_SIZE_IN_DESC_REGEX above) -
+                    // was needlessly cutting WhatsApp's background
+                    // prefetch of neighbouring album images short. Now
+                    // waits for as many files as the bubble's own
+                    // description said the album contains (falls back to
+                    // 1 if that wasn't detected), still bounded by the
+                    // overall MEDIA_DOWNLOAD_TIMEOUT_MS budget - backs
+                    // out early if the budget is nearly spent even with
+                    // fewer than expected, so this can never overrun the
+                    // outer timeout and get stuck on the viewer.
+                    val expectedAlbumSize = (MediaDownloadCoordinator.lastDetectedAlbumSize ?: 1).coerceAtLeast(1)
+                    val found = WaMediaLocator.findRecentMediaFiles(
                         this@WaSendAccessibilityService,
                         job.mediaType,
                         mediaTapTime,
+                        maxCount = expectedAlbumSize,
                         matchWindowMs = elapsedSinceTap + 5000L
                     )
-                    if (found != null) {
-                        EventLog.log("A11y-MediaDownload: ✅ קובץ אותר בדיסק (${found.file.name}) אחרי ${elapsedSinceTap / 1000}s - חוזר אחורה")
+                    val remainingBudgetMs = MEDIA_DOWNLOAD_TIMEOUT_MS - (System.currentTimeMillis() - mediaDownloadStartTime)
+                    val mustBackOutNow = found.isNotEmpty() && remainingBudgetMs < 2500L
+                    if (found.size >= expectedAlbumSize || mustBackOutNow) {
+                        EventLog.log("A11y-MediaDownload: ✅ נמצאו ${found.size}/$expectedAlbumSize קבצים בדיסק אחרי ${elapsedSinceTap / 1000}s - חוזר אחורה")
                         performGlobalAction(GLOBAL_ACTION_BACK)
                         downloadingMedia = false
                         MediaDownloadCoordinator.reportResult(MediaDownloadCoordinator.Result.SUCCESS)
                         goHomeToCloseWhatsAppChat()
                     } else {
-                        EventLog.log("A11y-MediaDownload: ⏳ [+${elapsedSinceTap / 1000}s] הקובץ עדיין לא נמצא בדיסק, ממשיך להמתין...")
+                        EventLog.log("A11y-MediaDownload: ⏳ [+${elapsedSinceTap / 1000}s] נמצאו ${found.size}/$expectedAlbumSize קבצים, ממשיך להמתין...")
                         handler.postDelayed(this, MEDIA_DOWNLOAD_POLL_INTERVAL_MS)
                     }
                 }

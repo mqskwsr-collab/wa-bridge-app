@@ -388,6 +388,10 @@ class WaNotificationListener : NotificationListenerService() {
             // so an album isn't silently truncated to a single photo.
             val count = MediaClassifier.extractCount(text)
             EventLog.log("Listener: 🖼️ הודעה מסווגת כמדיה (${mediaType.name}, כמות מזוהה: $count) - מחפש קבצים...")
+            // Mutable: may be widened below if the media bubble's own
+            // accessibility description reveals a larger true album size
+            // than the notification text did (see effectiveCount below).
+            var expectedCount = count
 
             var found = WaMediaLocator.findRecentMediaFiles(this, mediaType, postTimeMs, maxCount = count)
 
@@ -411,10 +415,24 @@ class WaNotificationListener : NotificationListenerService() {
                 val triggerStart = System.currentTimeMillis()
                 val triggered = MediaDownloadLearner.triggerDownloadAndWait(this, target, mediaType, contentIntent)
                 if (triggered) {
+                    // FIX (23.8.2026, album-size mismatch): the media
+                    // bubble's own accessibility description can reveal
+                    // the true album size even when the notification
+                    // text undercounted it (e.g. "תמונה אחת (1)" for the
+                    // first item of a real 5-photo album). Widen the
+                    // re-scan to whichever count is larger, so a
+                    // misleadingly-small notification-text count no
+                    // longer caps the whole album at 1 file.
+                    val detectedAlbumSize = MediaDownloadCoordinator.lastDetectedAlbumSize ?: 0
+                    val effectiveCount = maxOf(count, detectedAlbumSize)
+                    if (detectedAlbumSize > count) {
+                        EventLog.log("Listener: 🔢 גודל האלבום שזוהה מתוך המסך ($detectedAlbumSize) גדול מהכמות שזוהתה מטקסט ההתראה ($count) - מרחיב את החיפוש ל-$effectiveCount")
+                        expectedCount = effectiveCount
+                    }
                     val elapsedSinceTrigger = System.currentTimeMillis() - triggerStart
                     found = WaMediaLocator.findRecentMediaFiles(
                         this, mediaType, System.currentTimeMillis(),
-                        maxCount = count, matchWindowMs = elapsedSinceTrigger + 5000L
+                        maxCount = effectiveCount, matchWindowMs = elapsedSinceTrigger + 5000L
                     )
                 }
             }
@@ -443,8 +461,8 @@ class WaNotificationListener : NotificationListenerService() {
             }
             if (usable.isEmpty()) return
 
-            if (count > usable.size) {
-                EventLog.log("Listener: ℹ️ זוהו $count פריטים בהודעה אך נמצאו/נשלחו רק ${usable.size} - יתר הפריטים באלבום לא הצליחו להתאתר (מגבלה ידועה, ראו תיעוד ב-WaMediaLocator)")
+            if (expectedCount > usable.size) {
+                EventLog.log("Listener: ℹ️ זוהו $expectedCount פריטים בהודעה אך נמצאו/נשלחו רק ${usable.size} - יתר הפריטים באלבום לא הצליחו להתאתר (מגבלה ידועה, ראו תיעוד ב-WaMediaLocator)")
             }
 
             // Backward compatible: keep the original single-file fields
