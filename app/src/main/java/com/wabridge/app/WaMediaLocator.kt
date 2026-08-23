@@ -368,6 +368,19 @@ object WaMediaLocator {
         val sortOrder = "${MediaStore.MediaColumns.DATE_ADDED} DESC"
 
         val results = mutableListOf<FoundMedia>()
+        // FIX (24.8.2026, duplicate-row bug): confirmed on-device - a
+        // single MediaStore query call, 0 swipes involved, still
+        // returned the SAME file path twice as if they were 2 distinct
+        // photos (padding a real 2-photo result out to a false "3/3").
+        // MediaStore can genuinely contain more than one row for the
+        // same physical path (e.g. after a rescan re-indexes a file
+        // that was already indexed, without cleaning up the old row).
+        // The `path in excludePaths` check below only guards against
+        // paths the CALLER already knew about across separate calls -
+        // it never protected against the SAME query returning one path
+        // twice. Tracked here with a local set, independent of and in
+        // addition to excludePaths.
+        val seenPaths = mutableSetOf<String>()
         try {
             val cursor: Cursor? = context.contentResolver.query(
                 collection, projection, selection, selectionArgs, sortOrder
@@ -379,6 +392,7 @@ object WaMediaLocator {
                     val path = if (dataCol >= 0) it.getString(dataCol) else null
                     val name = if (nameCol >= 0) it.getString(nameCol) else null
                     if (path == null || path in excludePaths) continue
+                    if (!seenPaths.add(path)) continue
                     val file = File(path)
                     if (!file.isFile) continue
                     results.add(FoundMedia(file, guessMimeType(file.name)))
