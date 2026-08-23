@@ -83,6 +83,10 @@ class WaSendAccessibilityService : AccessibilityService() {
         // can never hang the flow indefinitely.
         private const val MEDIA_DOWNLOAD_TIMEOUT_PER_EXTRA_ITEM_MS = 6000L
         private const val MEDIA_DOWNLOAD_TIMEOUT_MS_MAX = 60000L
+        // FIX (23.8.2026, swiped-away-too-fast bug): minimum number of
+        // ~1s stage-1 poll cycles to let the CURRENT item sit before
+        // considering a swipe to the next one - see pollCyclesOnCurrentItem.
+        private const val MIN_POLL_CYCLES_BEFORE_SWIPE = 4
         // How often to re-check the media folder while the full-image
         // viewer is open, waiting for WhatsApp to finish writing the
         // real file to disk (see stage 1 doc comment - replaces the old
@@ -219,6 +223,17 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var noProgressSwipeCount = 0
     private var lastKnownFoundCount = 0
     private var currentViewerBounds: Rect? = null
+    // FIX (23.8.2026, swiped-away-too-fast bug): real on-device log
+    // (23.8 21:53) showed canSwipeForMore firing on the VERY FIRST poll
+    // cycle (~1s after tap), burning both available swipes within under
+    // a second and leaving WhatsApp no real time to even start
+    // downloading the FIRST image, let alone any swiped-to ones - 0/3
+    // files were ever found in a 26s budget. Tracks how many stage-1
+    // poll cycles have run on the CURRENTLY-displayed item since the
+    // last advance (tap or swipe); canSwipeForMore now also requires
+    // this to reach MIN_POLL_CYCLES_BEFORE_SWIPE first, giving each item
+    // a genuine chance to download before giving up on it.
+    private var pollCyclesOnCurrentItem = 0
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -292,6 +307,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             noProgressSwipeCount = 0
             lastKnownFoundCount = 0
             currentViewerBounds = null
+            pollCyclesOnCurrentItem = 0
             handler.post(mediaDownloadRunnable)
         }
     }
@@ -1058,10 +1074,12 @@ class WaSendAccessibilityService : AccessibilityService() {
                         noProgressSwipeCount++
                     }
                     lastKnownFoundCount = found.size
+                    pollCyclesOnCurrentItem++
 
                     val canSwipeForMore = found.size < expectedAlbumSize &&
                         swipesAttempted < maxSwipes &&
                         remainingBudgetMs > 3500L &&
+                        pollCyclesOnCurrentItem >= MIN_POLL_CYCLES_BEFORE_SWIPE &&
                         !mustBackOutNow
 
                     when {
@@ -1091,7 +1109,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                             handler.post(this)
                         }
                         else -> {
-                            EventLog.log("A11y-MediaDownload: ⏳ [+${elapsedSinceTap / 1000}s] נמצאו ${found.size}/$expectedAlbumSize קבצים, ממשיך להמתין...")
+                            EventLog.log("A11y-MediaDownload: ⏳ [+${elapsedSinceTap / 1000}s] נמצאו ${found.size}/$expectedAlbumSize קבצים (סבב $pollCyclesOnCurrentItem/$MIN_POLL_CYCLES_BEFORE_SWIPE על הפריט הנוכחי), ממשיך להמתין...")
                             handler.postDelayed(this, MEDIA_DOWNLOAD_POLL_INTERVAL_MS)
                         }
                     }
@@ -1120,6 +1138,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                     performSwipeGesture(bounds, swipeLeftToRight) {
                         swipesAttempted++
                         saveMenuAttemptStep = 0
+                        pollCyclesOnCurrentItem = 0
                         // Only re-dump the diagnostic trees for the first
                         // swipe - repeating a full tree dump per item
                         // would flood the log for a 5+ image album with
