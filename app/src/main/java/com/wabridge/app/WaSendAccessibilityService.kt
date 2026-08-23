@@ -130,6 +130,7 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var hasDumpedFullMediaTree = false
     private var hasDumpedPostTapTree = false
     private var hasDumpedMenuTree = false
+    private var hasDumpedAfterSaveTapTree = false
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -192,6 +193,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             hasDumpedFullMediaTree = false
             hasDumpedPostTapTree = false
             hasDumpedMenuTree = false
+            hasDumpedAfterSaveTapTree = false
             saveMenuAttemptStep = 0
             lastMediaDownloadDumpTime = 0L
             handler.post(mediaDownloadRunnable)
@@ -841,6 +843,18 @@ class WaSendAccessibilityService : AccessibilityService() {
                         handler.postDelayed(this, 700L)
                         return
                     }
+                    // DIAGNOSTIC (23.8.2026): one more one-time dump,
+                    // right after tapping whatever matched inside the
+                    // overflow menu - shows whether the menu actually
+                    // closed (confirming the tap registered at all) and
+                    // what screen we're looking at afterward, in case the
+                    // tap silently did nothing or navigated somewhere
+                    // unexpected.
+                    if (!hasDumpedAfterSaveTapTree) {
+                        hasDumpedAfterSaveTapTree = true
+                        EventLog.log("A11y-MediaDownload: 🌳 אבחון מסך אחרי לחיצה על פריט התפריט:")
+                        dumpFullNodeTree(root)
+                    }
                     // FIX (21.8.2026): was a blind fixed 3s wait then
                     // unconditional "back" - on-device log (21.8 10:25)
                     // showed the CORRECT bubble now gets tapped (desc=
@@ -993,7 +1007,7 @@ class WaSendAccessibilityService : AccessibilityService() {
         try {
             val classCounts = HashMap<String, Int>()
             data class ClickableInfo(
-                val cls: String, val text: String, val desc: String,
+                val node: AccessibilityNodeInfo, val cls: String, val text: String, val desc: String,
                 val id: String, val rect: Rect
             )
             val clickables = mutableListOf<ClickableInfo>()
@@ -1006,6 +1020,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                     node.getBoundsInScreen(r)
                     clickables.add(
                         ClickableInfo(
+                            node,
                             cls,
                             node.text?.toString() ?: "",
                             node.contentDescription?.toString() ?: "",
@@ -1028,9 +1043,23 @@ class WaSendAccessibilityService : AccessibilityService() {
 
             EventLog.log("A11y-MediaDownload: 🌳 אבחון מלא - ${clickables.size} nodes לחיצים סה\"כ, עד 15 (מסודר לפי מיקום אנכי):")
             clickables.sortedBy { it.rect.top }.take(15).forEach { c ->
+                // FIX (23.8.2026): on-device dump of an OPEN menu showed
+                // 8 clickable rows all logged as text='' desc='' - each
+                // row is a plain clickable container wrapping a SEPARATE
+                // TextView with the real label, which this per-node
+                // listing never reached. Now falls back to searching the
+                // node's own subtree for the first non-empty text/desc
+                // when the node itself has none, so menu/list rows show
+                // their real visible label instead of blank strings.
+                val label = if (c.text.isNotEmpty() || c.desc.isNotEmpty()) {
+                    null
+                } else {
+                    findDescendantTextMatchingRegex(c.node, Regex(".+"))
+                }
                 EventLog.log(
                     "A11y-MediaDownload: 🌳   class=${c.cls} text='${c.text}' " +
-                        "desc='${c.desc}' id='${c.id}' bounds=${c.rect}"
+                        "desc='${c.desc}'" + (if (label != null) " label='$label'" else "") +
+                        " id='${c.id}' bounds=${c.rect}"
                 )
             }
         } catch (e: Exception) {
