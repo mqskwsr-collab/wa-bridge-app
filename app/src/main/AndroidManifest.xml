@@ -42,6 +42,18 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!--
+      FIX (23.8.2026): needed by the new "שמור לקובץ" (save log to
+      file) button on API 26-28 only - those versions require the
+      classic runtime WRITE_EXTERNAL_STORAGE permission to write into
+      the public Downloads folder via direct File access. API 29+
+      instead goes through MediaStore.Downloads (see MainActivity's
+      saveLogToDownloadsFile()), which needs no permission at all under
+      scoped storage - that's the whole point of using it there.
+    -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <application
         android:name=".WaBridgeApplication"
         android:allowBackup="true"

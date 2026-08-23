@@ -24,6 +24,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val REQUEST_CODE_READ_STORAGE = 1001
+        private const val REQUEST_CODE_WRITE_STORAGE_FOR_LOG = 1002
     }
 
     private lateinit var tvStatus: TextView
@@ -114,6 +115,26 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 Toast.makeText(this, "השיתוף נכשל: ${e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
             }
+        }
+
+        // FIX (23.8.2026): both "העתק" (clipboard) and "שתף" (share
+        // sheet) were confirmed on-device to still not reliably get the
+        // log out - clipboard silently doesn't persist on some
+        // NoxPlayer/emulator builds even after the read-back
+        // verification added on 21.8.2026, and a share sheet depends on
+        // the emulator actually having a target app installed to share
+        // TO (Gmail/Drive/etc.), which some minimal NoxPlayer setups
+        // don't. This third option sidesteps BOTH: it writes the log as
+        // a REAL .txt file straight into the device's Downloads folder,
+        // which can then be found and opened/attached/uploaded via any
+        // file manager - the same mechanism that already reliably got a
+        // log out of this exact device once before (the very
+        // wa-bridge-handoff.txt file this fix is a response to).
+        // Deliberately writes the FULL (untruncated) log, not the
+        // clipboard-safe truncated version - a file has no Binder
+        // transaction size limit to work around.
+        findViewById<Button>(R.id.btnSaveLogFile).setOnClickListener {
+            saveLogToDownloadsFileOrRequestPermission()
         }
 
         val lastCrash = WaBridgeApplication.getLastCrash(this)
@@ -230,6 +251,65 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * FIX (23.8.2026): entry point for the "💾 שמור לקובץ" button. Only
+     * API 26-28 need an explicit runtime permission check first (see
+     * the manifest comment on WRITE_EXTERNAL_STORAGE) - API 29+ goes
+     * through MediaStore.Downloads in writeLogFile(), which needs none.
+     */
+    private fun saveLogToDownloadsFileOrRequestPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), REQUEST_CODE_WRITE_STORAGE_FOR_LOG
+            )
+            return
+        }
+        writeLogFile()
+    }
+
+    /**
+     * Writes the full (untruncated) EventLog contents to a timestamped
+     * .txt file in the device's public Downloads folder. Uses
+     * MediaStore.Downloads on API 29+ (no permission needed under
+     * scoped storage - this is exactly the "escape hatch" it exists
+     * for), and falls back to classic direct File access on API 26-28
+     * (permission already verified/requested by the caller above).
+     * Reports success/failure honestly via Toast either way, same
+     * pattern as the clipboard/share buttons above - never silently
+     * does nothing.
+     */
+    private fun writeLogFile() {
+        val logText = EventLog.getAll().ifBlank { "(אין אירועים עדיין)" }
+        val fileName = "wa-bridge-log-${System.currentTimeMillis()}.txt"
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                }
+                val uri = contentResolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (uri == null) {
+                    Toast.makeText(this, "שמירת הקובץ נכשלה - לא ניתן ליצור קובץ ב-Downloads", Toast.LENGTH_LONG).show()
+                    return
+                }
+                contentResolver.openOutputStream(uri)?.use { it.write(logText.toByteArray(Charsets.UTF_8)) }
+                Toast.makeText(this, "✅ היומן נשמר: Downloads/$fileName\nפתח באפליקציית הקבצים כדי לצרף/להעלות", Toast.LENGTH_LONG).show()
+            } else {
+                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if (!downloadsDir.exists()) downloadsDir.mkdirs()
+                val file = java.io.File(downloadsDir, fileName)
+                file.writeText(logText, Charsets.UTF_8)
+                Toast.makeText(this, "✅ היומן נשמר: ${file.absolutePath}\nפתח באפליקציית הקבצים כדי לצרף/להעלות", Toast.LENGTH_LONG).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "שמירת הקובץ נכשלה: ${e.javaClass.simpleName}: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     override fun onPause() {
         super.onPause()
         uiHandler.removeCallbacks(logRefreshRunnable)
@@ -244,6 +324,13 @@ class MainActivity : AppCompatActivity() {
             // same as every other manual-grant flow already does via
             // onResume when returning from a Settings screen.
             updateStatus()
+        }
+        if (requestCode == REQUEST_CODE_WRITE_STORAGE_FOR_LOG) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                writeLogFile()
+            } else {
+                Toast.makeText(this, "אין הרשאת כתיבה - לא ניתן לשמור את היומן לקובץ במכשיר הזה", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
