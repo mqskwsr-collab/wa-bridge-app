@@ -1,8 +1,11 @@
 package com.wabridge.app
 
 import android.content.Context
+import android.database.Cursor
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
 import java.io.File
 
@@ -127,6 +130,26 @@ object WaMediaLocator {
             MediaClassifier.MediaType.NONE -> return null
         }
 
+        // FIX (23.8.2026): on-device log finally showed all 8 real
+        // overflow-menu item labels (previous dumps only showed empty
+        // container text): כל המדיה / להציג בצ'אט / שיתוף / שמירה /
+        // יצירת מדבקה / חיפוש באינטרנט / להגדיר בתור… / הצגה בגלריה.
+        // "שמירה" was confirmed to genuinely get tapped (the menu closed
+        // afterward, confirmed via the post-tap dump) - yet still no
+        // file appeared in ANY of the 4 guessed folder paths (legacy +
+        // new WhatsApp cache, Pictures, DCIM). The presence of a SEPARATE
+        // "הצגה בגלריה" ("Show in Gallery") item alongside "שמירה"
+        // strongly suggests the save genuinely succeeds but lands
+        // somewhere none of our guessed paths cover. Rather than keep
+        // guessing folder names one at a time, this now queries
+        // MediaStore directly FIRST - the OS-level index of every media
+        // file regardless of which physical folder it's actually in,
+        // which WhatsApp's "Save" must insert into to be scoped-storage
+        // compliant. Falls back to the old folder-scanning approach
+        // below only if MediaStore has nothing recent (e.g. voice notes,
+        // which often aren't MediaStore-indexed at all).
+        findViaMediaStore(context, type, notificationTimeMs, matchWindowMs)?.let { return it }
+
         val root = Environment.getExternalStorageDirectory()
         // FIX (22.8.2026): this used to stop at the FIRST candidate
         // folder that merely EXISTED (isDirectory), even if nothing in
@@ -198,6 +221,71 @@ object WaMediaLocator {
         Log.i(TAG, "Matched media file: ${best.absolutePath} (mime=$mimeType)")
         EventLog.log("Media: ✅ נמצא קובץ: ${best.name} (ב-${dir.absolutePath})")
         return FoundMedia(best, mimeType)
+    }
+
+    /**
+     * Queries MediaStore for the newest IMAGE/VIDEO row added within the
+     * match window, regardless of which physical folder it lives in -
+     * see the long FIX (23.8.2026) comment in findRecentMediaFile for
+     * why this exists. MediaStore's DATE_ADDED/DATE_MODIFIED columns are
+     * in SECONDS (not ms) - converted accordingly. VOICE_NOTE is skipped
+     * entirely: WhatsApp voice notes (.opus) are frequently not
+     * MediaStore-indexed at all, so a query would reliably return
+     * nothing useful; the folder-scan fallback handles that type.
+     */
+    private fun findViaMediaStore(context: Context, type: MediaClassifier.MediaType, notificationTimeMs: Long, matchWindowMs: Long): FoundMedia? {
+        val collection = when (type) {
+            MediaClassifier.MediaType.IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            MediaClassifier.MediaType.VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            else -> return null
+        }
+
+        val windowSec = matchWindowMs / 1000
+        val notificationSec = notificationTimeMs / 1000
+        val minSec = notificationSec - windowSec
+        val maxSec = notificationSec + windowSec
+
+        // MediaStore.MediaColumns.DATA is deprecated but still populated
+        // with a real filesystem path on devices where the app holds
+        // MANAGE_EXTERNAL_STORAGE/READ_EXTERNAL_STORAGE (which this app
+        // requires anyway - see isAvailable()), so it's fine to rely on
+        // here rather than juggling a separate Uri-based read path just
+        // for this one case.
+        val projection = arrayOf(
+            MediaStore.MediaColumns.DATA,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.DATE_ADDED,
+            MediaStore.MediaColumns.DATE_MODIFIED
+        )
+        val selection = "${MediaStore.MediaColumns.DATE_ADDED} BETWEEN ? AND ?"
+        val selectionArgs = arrayOf(minSec.toString(), maxSec.toString())
+        val sortOrder = "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+
+        try {
+            val cursor: Cursor? = context.contentResolver.query(
+                collection, projection, selection, selectionArgs, sortOrder
+            )
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val dataCol = it.getColumnIndex(MediaStore.MediaColumns.DATA)
+                    val nameCol = it.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                    val path = if (dataCol >= 0) it.getString(dataCol) else null
+                    val name = if (nameCol >= 0) it.getString(nameCol) else null
+                    if (path != null) {
+                        val file = File(path)
+                        if (file.isFile) {
+                            EventLog.log("Media: ✅ נמצא קובץ דרך MediaStore: ${name ?: file.name} (${file.absolutePath})")
+                            return FoundMedia(file, guessMimeType(file.name))
+                        }
+                    }
+                }
+            }
+            EventLog.log("Media: 🔎 אבחון - שאילתת MediaStore לא מצאה תוצאה בחלון הזמן (${minSec}-${maxSec})")
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaStore query failed", e)
+            EventLog.log("Media: 🔎 שאילתת MediaStore נכשלה: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        return null
     }
 
     private fun guessMimeType(fileName: String): String {

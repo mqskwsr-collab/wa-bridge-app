@@ -7,5 +7,5 @@ package com.wabridge.app
  * stale install.
  */
 object BuildInfo {
-    const val BUILD_TAG = "FIX54-real-menu-item-labels-2026-08-23"
+    const val BUILD_TAG = "FIX55-mediastore-query-2026-08-23"
 }
