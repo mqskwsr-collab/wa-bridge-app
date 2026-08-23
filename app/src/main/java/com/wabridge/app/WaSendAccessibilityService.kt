@@ -224,9 +224,17 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var maxSwipes = 0
     private var swipeLeftToRight = true
     private var directionFlipped = false
-    private var noProgressSwipeCount = 0
-    private var lastKnownFoundCount = 0
+    // FIX (23.8.2026, false-positive direction-flip bug): foundCountBeforeSwipe
+    // is a snapshot taken exactly once per swipe (never per poll tick);
+    // consecutiveSwipesWithNoGrowth only increments by comparing against
+    // that snapshot, so ordinary settle-time waiting after a SUCCESSFUL
+    // swipe can never be mistaken for a failed one (the earlier version
+    // compared every poll tick against the previous tick, which always
+    // looked like "no progress" once a swipe's one file was already
+    // found and nothing changed for the remaining settle-time polls).
     private var currentViewerBounds: Rect? = null
+    private var foundCountBeforeSwipe = 0
+    private var consecutiveSwipesWithNoGrowth = 0
     // FIX (23.8.2026, swiped-away-too-fast bug): real on-device log
     // (23.8 21:53) showed canSwipeForMore firing on the VERY FIRST poll
     // cycle (~1s after tap), burning both available swipes within under
@@ -309,8 +317,8 @@ class WaSendAccessibilityService : AccessibilityService() {
             maxSwipes = 0
             swipeLeftToRight = true
             directionFlipped = false
-            noProgressSwipeCount = 0
-            lastKnownFoundCount = 0
+            foundCountBeforeSwipe = 0
+            consecutiveSwipesWithNoGrowth = 0
             currentViewerBounds = null
             pollCyclesOnCurrentItem = 0
             handler.post(mediaDownloadRunnable)
@@ -1100,17 +1108,6 @@ class WaSendAccessibilityService : AccessibilityService() {
                     )
                     val remainingBudgetMs = dynamicMediaDownloadTimeoutMs - (System.currentTimeMillis() - mediaDownloadStartTime)
                     val mustBackOutNow = found.isNotEmpty() && remainingBudgetMs < 2500L
-
-                    // FIX (23.8.2026, full-album swipe): track whether the
-                    // most recent swipe actually produced a new file, so a
-                    // wrong direction guess can self-correct instead of
-                    // burning every remaining swipe attempt uselessly.
-                    if (found.size > lastKnownFoundCount) {
-                        noProgressSwipeCount = 0
-                    } else if (swipesAttempted > 0) {
-                        noProgressSwipeCount++
-                    }
-                    lastKnownFoundCount = found.size
                     pollCyclesOnCurrentItem++
 
                     val canSwipeForMore = found.size < expectedAlbumSize &&
@@ -1128,17 +1125,35 @@ class WaSendAccessibilityService : AccessibilityService() {
                             goHomeToCloseWhatsAppChat()
                         }
                         canSwipeForMore -> {
-                            // FIX (23.8.2026, full-album swipe): self-
-                            // correct a wrong direction guess - if 2
-                            // straight swipes produced no new file at all
-                            // AND we haven't already flipped once, try the
-                            // opposite direction instead of continuing to
-                            // swipe the wrong way for the rest of the
-                            // album.
-                            if (noProgressSwipeCount >= 2 && !directionFlipped) {
+                            // FIX (23.8.2026, false-positive direction-flip
+                            // bug): the PREVIOUS version compared found.size
+                            // against the previous POLL CYCLE on every tick
+                            // (foundCountBeforeSwipe wasn't tracked yet) -
+                            // but once a swipe finds its one new file, every
+                            // SUBSEQUENT settle-time poll on that same item
+                            // naturally sees no further growth (there's
+                            // nothing left to find until the NEXT swipe),
+                            // so the "no progress" counter reached its
+                            // threshold from ordinary waiting, not from an
+                            // actual failed swipe - confirmed on a real
+                            // device where swipe #1 genuinely found a new
+                            // file (1→2) but the direction still flipped
+                            // right before swipe #2, causing it to revisit
+                            // an already-captured image (saved again under
+                            // WhatsApp's auto "(1)" suffix) instead of
+                            // reaching the real 3rd image. Fixed by
+                            // comparing found.size only AT SWIPE BOUNDARIES
+                            // (foundCountBeforeSwipe, updated exactly once
+                            // per swipe) instead of every poll tick.
+                            val swipeHelped = found.size > foundCountBeforeSwipe
+                            if (swipesAttempted > 0) {
+                                consecutiveSwipesWithNoGrowth = if (swipeHelped) 0 else consecutiveSwipesWithNoGrowth + 1
+                            }
+                            foundCountBeforeSwipe = found.size
+                            if (consecutiveSwipesWithNoGrowth >= 2 && !directionFlipped) {
                                 swipeLeftToRight = !swipeLeftToRight
                                 directionFlipped = true
-                                noProgressSwipeCount = 0
+                                consecutiveSwipesWithNoGrowth = 0
                                 EventLog.log("A11y-MediaDownload: 🔄 שתי החלקות רצופות בלי קובץ חדש - מהפך כיוון החלקה (עכשיו: ${if (swipeLeftToRight) "שמאל→ימין" else "ימין→שמאל"})")
                             }
                             EventLog.log("A11y-MediaDownload: 👉 מחליק לתמונה הבאה באלבום (${swipesAttempted + 1}/$maxSwipes) - נמצאו ${found.size}/$expectedAlbumSize עד כה")
