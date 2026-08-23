@@ -73,6 +73,16 @@ class WaSendAccessibilityService : AccessibilityService() {
         private const val MAX_TAP_ATTEMPTS = 8
         private const val LEARN_TIMEOUT_MS = 18000L
         private const val MEDIA_DOWNLOAD_TIMEOUT_MS = 14000L
+        // FIX (23.8.2026, full-album swipe): a multi-image album needs
+        // far more than the single-image budget above - one swipe +
+        // save-menu + write-to-disk cycle per extra item realistically
+        // costs several seconds. Once the true album size is known (see
+        // ALBUM_SIZE_IN_DESC_REGEX), the per-job dynamic timeout is
+        // extended by this much for every item beyond the first, capped
+        // at MEDIA_DOWNLOAD_TIMEOUT_MS_MAX so a huge/misdetected count
+        // can never hang the flow indefinitely.
+        private const val MEDIA_DOWNLOAD_TIMEOUT_PER_EXTRA_ITEM_MS = 6000L
+        private const val MEDIA_DOWNLOAD_TIMEOUT_MS_MAX = 60000L
         // How often to re-check the media folder while the full-image
         // viewer is open, waiting for WhatsApp to finish writing the
         // real file to disk (see stage 1 doc comment - replaces the old
@@ -96,6 +106,17 @@ class WaSendAccessibilityService : AccessibilityService() {
         // own text undercounted it. See MediaDownloadCoordinator's
         // lastDetectedAlbumSize doc comment for the full story.
         private val ALBUM_SIZE_IN_DESC_REGEX = Regex("""(?:הצגת כל|showing all|view all)\s*(\d+)\s*(?:פריטי\s*(?:ה)?מדיה|media items?)""", RegexOption.IGNORE_CASE)
+        // FIX (23.8.2026, second album-size format): on-device log
+        // (23.8 18:24) showed WhatsApp doesn't always use the "show all
+        // N media items" collapsed-bubble format above - sometimes
+        // (when the chat is already scrolled such that individual album
+        // items are directly visible, not collapsed) the tapped bubble's
+        // own description is instead the per-item "showing image X of Y"
+        // form, e.g. "‏הצגת ‏תמונה, 3 מתוך 3" / "showing image 3 of 3".
+        // The Y here is just as reliable a total-album-size signal as
+        // the "show all" form - actually more so, since it's on the
+        // EXACT bubble being tapped rather than a sibling summary bubble.
+        private val ALBUM_SIZE_ITEM_OF_TOTAL_REGEX = Regex("""(?:מתוך|of)\s*(\d+)""", RegexOption.IGNORE_CASE)
         // FIX (21.8.2026): the FULL on-device tree dump (see FIX46)
         // revealed the real culprit for why imgCount stayed flat at 2
         // the whole timeout - the photo bubble is classed as
@@ -125,6 +146,13 @@ class WaSendAccessibilityService : AccessibilityService() {
         // timed out even with the correct screen open.
         private val MORE_OPTIONS_DESC_REGEX = Regex("""(more options|options menu|אפשרויות נוספות|עוד אפשרויות)""", RegexOption.IGNORE_CASE)
         private val SAVE_TO_GALLERY_REGEX = Regex("""(save to gallery|save|download|שמירה בגלריה|שמור בגלריה|שמירה|הורדה)""", RegexOption.IGNORE_CASE)
+        // FIX (23.8.2026, full-album swipe): label of the container node
+        // that holds the currently-displayed full-screen image (seen in
+        // the on-device dump as a ViewGroup with label='הגדלת התמונה'
+        // and bounds spanning almost the whole screen) - used to know
+        // WHERE on screen to swipe. Falls back to a generous full-width
+        // band if this isn't found for some reason.
+        private val IMAGE_VIEWER_CONTAINER_LABEL_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image)""", RegexOption.IGNORE_CASE)
     }
 
     // 0=not attempted, 1=tapped "More options", waiting for menu, 2=done
@@ -161,7 +189,7 @@ class WaSendAccessibilityService : AccessibilityService() {
     // --- Media forced-download state (separate from all flows above) ---
     private var downloadingMedia = false
     private var mediaDownloadStartTime = 0L
-    private var mediaDownloadStage = 0 // -1=scroll to bottom if needed, 0=find/tap most recent media bubble, 1=settle+back out
+    private var mediaDownloadStage = 0 // -1=scroll to bottom if needed, 0=find/tap most recent media bubble, 1=settle+back out, 2=swipe to next album item
     private var mediaTapTime = 0L
     private var lastMediaDownloadDumpTime = 0L
     private var scrolledToLatestMessage = false
@@ -169,6 +197,28 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var hasDumpedPostTapTree = false
     private var hasDumpedMenuTree = false
     private var hasDumpedAfterSaveTapTree = false
+    // FIX (23.8.2026, full-album swipe): extends the single-bubble force
+    // -download flow into a real per-item loop through WhatsApp's
+    // full-screen album viewer instead of stopping after one image.
+    // dynamicMediaDownloadTimeoutMs starts equal to the normal single-
+    // image budget and is widened once the true album size is known
+    // (see ALBUM_SIZE_IN_DESC_REGEX / MediaDownloadCoordinator.
+    // lastDetectedAlbumSize). swipesAttempted/maxSwipes bound how many
+    // times stage 2 will try to advance to the next item. swipeLeftToRight
+    // is a best guess (unconfirmed on a real device - WhatsApp's RTL
+    // Hebrew layout may reverse which physical direction means "next")
+    // that self-corrects: if 2 consecutive swipes produce no new file at
+    // all, it flips direction once and tries again, so a wrong initial
+    // guess still recovers rather than silently swiping the wrong way
+    // for the whole album.
+    private var dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
+    private var swipesAttempted = 0
+    private var maxSwipes = 0
+    private var swipeLeftToRight = true
+    private var directionFlipped = false
+    private var noProgressSwipeCount = 0
+    private var lastKnownFoundCount = 0
+    private var currentViewerBounds: Rect? = null
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -234,6 +284,14 @@ class WaSendAccessibilityService : AccessibilityService() {
             hasDumpedAfterSaveTapTree = false
             saveMenuAttemptStep = 0
             lastMediaDownloadDumpTime = 0L
+            dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
+            swipesAttempted = 0
+            maxSwipes = 0
+            swipeLeftToRight = true
+            directionFlipped = false
+            noProgressSwipeCount = 0
+            lastKnownFoundCount = 0
+            currentViewerBounds = null
             handler.post(mediaDownloadRunnable)
         }
     }
@@ -704,9 +762,9 @@ class WaSendAccessibilityService : AccessibilityService() {
             }
 
             val elapsed = System.currentTimeMillis() - mediaDownloadStartTime
-            if (elapsed > MEDIA_DOWNLOAD_TIMEOUT_MS) {
+            if (elapsed > dynamicMediaDownloadTimeoutMs) {
                 Log.w(TAG, "Timed out forcing media download (stage=$mediaDownloadStage)")
-                EventLog.log("A11y-MediaDownload: ❌ Timeout בשלב $mediaDownloadStage")
+                EventLog.log("A11y-MediaDownload: ❌ Timeout בשלב $mediaDownloadStage (תקציב זמן: ${dynamicMediaDownloadTimeoutMs / 1000}s)")
                 // FIX (21.8.2026): if the timeout fires while stage 1's
                 // new polling loop is still waiting (i.e. we're still
                 // sitting in WhatsApp's full-screen photo viewer), back
@@ -810,9 +868,15 @@ class WaSendAccessibilityService : AccessibilityService() {
                         // here, before the tap, so attachMediaIfAny can
                         // widen its search instead of stopping at 1.
                         val descText = bubble.contentDescription?.toString() ?: ""
-                        ALBUM_SIZE_IN_DESC_REGEX.find(descText)?.groupValues?.get(1)?.toIntOrNull()?.let { n ->
+                        val detectedAlbumN = ALBUM_SIZE_IN_DESC_REGEX.find(descText)?.groupValues?.get(1)?.toIntOrNull()
+                            ?: ALBUM_SIZE_ITEM_OF_TOTAL_REGEX.find(descText)?.groupValues?.get(1)?.toIntOrNull()
+                        detectedAlbumN?.let { n ->
                             EventLog.log("A11y-MediaDownload: 🔢 גודל אלבום אמיתי זוהה מתוך תיאור הבועה: $n")
                             MediaDownloadCoordinator.reportDetectedAlbumSize(n)
+                            maxSwipes = (n - 1).coerceAtLeast(0)
+                            dynamicMediaDownloadTimeoutMs = (MEDIA_DOWNLOAD_TIMEOUT_MS + maxSwipes * MEDIA_DOWNLOAD_TIMEOUT_PER_EXTRA_ITEM_MS)
+                                .coerceAtMost(MEDIA_DOWNLOAD_TIMEOUT_MS_MAX)
+                            EventLog.log("A11y-MediaDownload: ⏱️ תקציב הזמן הורחב ל-${dynamicMediaDownloadTimeoutMs / 1000}s עבור אלבום בגודל $n (עד $maxSwipes החלקות)")
                         }
                         EventLog.log("A11y-MediaDownload: נמצאה בועת מדיה, לוחץ לפתיחה (הכרחת הורדה)")
                         bubble.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -956,17 +1020,96 @@ class WaSendAccessibilityService : AccessibilityService() {
                         maxCount = expectedAlbumSize,
                         matchWindowMs = elapsedSinceTap + 5000L
                     )
-                    val remainingBudgetMs = MEDIA_DOWNLOAD_TIMEOUT_MS - (System.currentTimeMillis() - mediaDownloadStartTime)
+                    val remainingBudgetMs = dynamicMediaDownloadTimeoutMs - (System.currentTimeMillis() - mediaDownloadStartTime)
                     val mustBackOutNow = found.isNotEmpty() && remainingBudgetMs < 2500L
-                    if (found.size >= expectedAlbumSize || mustBackOutNow) {
-                        EventLog.log("A11y-MediaDownload: ✅ נמצאו ${found.size}/$expectedAlbumSize קבצים בדיסק אחרי ${elapsedSinceTap / 1000}s - חוזר אחורה")
-                        performGlobalAction(GLOBAL_ACTION_BACK)
-                        downloadingMedia = false
-                        MediaDownloadCoordinator.reportResult(MediaDownloadCoordinator.Result.SUCCESS)
-                        goHomeToCloseWhatsAppChat()
-                    } else {
-                        EventLog.log("A11y-MediaDownload: ⏳ [+${elapsedSinceTap / 1000}s] נמצאו ${found.size}/$expectedAlbumSize קבצים, ממשיך להמתין...")
-                        handler.postDelayed(this, MEDIA_DOWNLOAD_POLL_INTERVAL_MS)
+
+                    // FIX (23.8.2026, full-album swipe): track whether the
+                    // most recent swipe actually produced a new file, so a
+                    // wrong direction guess can self-correct instead of
+                    // burning every remaining swipe attempt uselessly.
+                    if (found.size > lastKnownFoundCount) {
+                        noProgressSwipeCount = 0
+                    } else if (swipesAttempted > 0) {
+                        noProgressSwipeCount++
+                    }
+                    lastKnownFoundCount = found.size
+
+                    val canSwipeForMore = found.size < expectedAlbumSize &&
+                        swipesAttempted < maxSwipes &&
+                        remainingBudgetMs > 3500L &&
+                        !mustBackOutNow
+
+                    when {
+                        found.size >= expectedAlbumSize || mustBackOutNow -> {
+                            EventLog.log("A11y-MediaDownload: ✅ נמצאו ${found.size}/$expectedAlbumSize קבצים בדיסק אחרי ${elapsedSinceTap / 1000}s ו-$swipesAttempted החלקות - חוזר אחורה")
+                            performGlobalAction(GLOBAL_ACTION_BACK)
+                            downloadingMedia = false
+                            MediaDownloadCoordinator.reportResult(MediaDownloadCoordinator.Result.SUCCESS)
+                            goHomeToCloseWhatsAppChat()
+                        }
+                        canSwipeForMore -> {
+                            // FIX (23.8.2026, full-album swipe): self-
+                            // correct a wrong direction guess - if 2
+                            // straight swipes produced no new file at all
+                            // AND we haven't already flipped once, try the
+                            // opposite direction instead of continuing to
+                            // swipe the wrong way for the rest of the
+                            // album.
+                            if (noProgressSwipeCount >= 2 && !directionFlipped) {
+                                swipeLeftToRight = !swipeLeftToRight
+                                directionFlipped = true
+                                noProgressSwipeCount = 0
+                                EventLog.log("A11y-MediaDownload: 🔄 שתי החלקות רצופות בלי קובץ חדש - מהפך כיוון החלקה (עכשיו: ${if (swipeLeftToRight) "שמאל→ימין" else "ימין→שמאל"})")
+                            }
+                            EventLog.log("A11y-MediaDownload: 👉 מחליק לתמונה הבאה באלבום (${swipesAttempted + 1}/$maxSwipes) - נמצאו ${found.size}/$expectedAlbumSize עד כה")
+                            mediaDownloadStage = 2
+                            handler.post(this)
+                        }
+                        else -> {
+                            EventLog.log("A11y-MediaDownload: ⏳ [+${elapsedSinceTap / 1000}s] נמצאו ${found.size}/$expectedAlbumSize קבצים, ממשיך להמתין...")
+                            handler.postDelayed(this, MEDIA_DOWNLOAD_POLL_INTERVAL_MS)
+                        }
+                    }
+                }
+                2 -> {
+                    // FIX (23.8.2026, full-album swipe): swipes within
+                    // WhatsApp's full-screen album viewer to advance to
+                    // the next item, then hands back to stage 1 to run
+                    // the same "More options -> save" sequence for THAT
+                    // item. UNVERIFIED ON A REAL DEVICE - the gesture
+                    // itself, the exact swipe direction, and whether the
+                    // viewer resets its "More options" state per-item all
+                    // need confirming from a real log. If this stage
+                    // never manages to increase found.size at all (both
+                    // directions tried), stage 1's mustBackOutNow/timeout
+                    // paths still guarantee we back out cleanly with
+                    // whatever was actually captured - this can only add
+                    // images on top of the old single-image behaviour,
+                    // never regress below it.
+                    if (currentViewerBounds == null) {
+                        currentViewerBounds = findImageViewerBounds(root)
+                    }
+                    val screenWidth = resources.displayMetrics.widthPixels
+                    val screenHeight = resources.displayMetrics.heightPixels
+                    val bounds = currentViewerBounds ?: Rect(0, screenHeight / 5, screenWidth, screenHeight * 4 / 5)
+                    performSwipeGesture(bounds, swipeLeftToRight) {
+                        swipesAttempted++
+                        saveMenuAttemptStep = 0
+                        // Only re-dump the diagnostic trees for the first
+                        // swipe - repeating a full tree dump per item
+                        // would flood the log for a 5+ image album with
+                        // little added value once the pattern is known.
+                        if (swipesAttempted > 1) {
+                            hasDumpedPostTapTree = true
+                            hasDumpedMenuTree = true
+                            hasDumpedAfterSaveTapTree = true
+                        }
+                        mediaDownloadStage = 1
+                        // Give the swipe animation + WhatsApp's next-image
+                        // load a moment to settle before immediately
+                        // hunting for "More options" on what might still
+                        // be mid-transition.
+                        handler.postDelayed(mediaDownloadRunnable, 900L)
                     }
                 }
             }
@@ -982,6 +1125,72 @@ class WaSendAccessibilityService : AccessibilityService() {
      * only if no description match is found, as a safety net for
      * WhatsApp versions/locales where the description text differs.
      */
+    /**
+     * FIX (23.8.2026, full-album swipe): dispatches a real synthesized
+     * horizontal drag across [bounds] - the only way to advance
+     * WhatsApp's full-screen album viewer to the next item; there is no
+     * clickable "next" button in the accessibility tree (confirmed by
+     * the on-device dumps used to build the rest of this flow - only
+     * back/star/forward/edit/more-options icons were ever found). Always
+     * calls [onComplete] exactly once, whether the gesture actually
+     * dispatched or not, so the caller never has to special-case a
+     * dispatch failure.
+     */
+    private fun performSwipeGesture(bounds: Rect, leftToRight: Boolean, onComplete: () -> Unit) {
+        try {
+            val y = bounds.centerY().toFloat()
+            val margin = (bounds.width() / 6).coerceAtLeast(40)
+            val startX = if (leftToRight) (bounds.left + margin).toFloat() else (bounds.right - margin).toFloat()
+            val endX = if (leftToRight) (bounds.right - margin).toFloat() else (bounds.left + margin).toFloat()
+            val path = Path().apply {
+                moveTo(startX, y)
+                lineTo(endX, y)
+            }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 280))
+                .build()
+            val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    onComplete()
+                }
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    EventLog.log("A11y-MediaDownload: ⚠️ מחוות ההחלקה בוטלה על ידי המערכת")
+                    onComplete()
+                }
+            }, null)
+            if (!dispatched) {
+                EventLog.log("A11y-MediaDownload: ⚠️ dispatchGesture להחלקה החזיר false - ממשיך בכל זאת")
+                onComplete()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Swipe gesture failed", e)
+            EventLog.log("A11y-MediaDownload: ❌ שגיאה בביצוע מחוות החלקה: ${e.javaClass.simpleName}: ${e.message}")
+            onComplete()
+        }
+    }
+
+    /**
+     * Finds the on-screen bounds of the currently-displayed full-screen
+     * image, to know where to swipe. Looks for the container node whose
+     * own label/content-description matches IMAGE_VIEWER_CONTAINER_LABEL_REGEX
+     * (seen on-device as a ViewGroup, label='הגדלת התמונה', spanning
+     * almost the full screen). Returns null if not found - the caller
+     * falls back to a generous full-width band in that case.
+     */
+    private fun findImageViewerBounds(root: AccessibilityNodeInfo): Rect? {
+        val label = root.contentDescription?.toString() ?: ""
+        if (IMAGE_VIEWER_CONTAINER_LABEL_REGEX.containsMatchIn(label)) {
+            val r = Rect()
+            root.getBoundsInScreen(r)
+            return r
+        }
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i) ?: continue
+            findImageViewerBounds(child)?.let { return it }
+        }
+        return null
+    }
+
     private fun findBottommostImageNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         findNodeByDescription(root)?.let { return it }
         return findBottommostImageViewClassed(root)

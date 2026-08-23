@@ -24,7 +24,15 @@ import java.util.concurrent.TimeUnit
  */
 object MediaDownloadLearner {
     private const val TAG = "WaBridgeMediaDownload"
-    private const val DOWNLOAD_WAIT_TIMEOUT_MS = 15000L
+    // FIX (23.8.2026, full-album swipe): must comfortably exceed
+    // WaSendAccessibilityService's own dynamic per-job budget (which now
+    // scales up with album size, capped at MEDIA_DOWNLOAD_TIMEOUT_MS_MAX
+    // = 60s there) - otherwise this caller-side wait could give up on a
+    // legitimately still-working multi-swipe album download before the
+    // accessibility service itself does, same class of bug as the
+    // existing PollingService.SEND_WAIT_TIMEOUT_MS vs. accessibility
+    // SEARCH_TIMEOUT_MS margin already documented elsewhere.
+    private const val DOWNLOAD_WAIT_TIMEOUT_MS = 65000L
 
     /**
      * Returns true if the tap-to-download automation completed
