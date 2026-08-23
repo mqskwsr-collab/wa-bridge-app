@@ -34,6 +34,38 @@ import android.view.accessibility.AccessibilityNodeInfo
  */
 class WaSendAccessibilityService : AccessibilityService() {
 
+    /**
+     * FIX (23.8.2026, missed-message root cause): every automated action
+     * (send reply / force-download media / learn group link / learn
+     * phone) opens a specific WhatsApp chat and then, before this fix,
+     * simply left it open on screen with no code ever navigating away.
+     * WhatsApp does NOT post a system notification for a new incoming
+     * message on a chat that is already open on screen - so if a real
+     * message from that exact contact/group arrived while the chat sat
+     * open from an earlier automated action, WA Bridge never saw ANY
+     * trace of it (not even the raw "📩 notification received" log line
+     * that fires for every other WhatsApp notification), producing a
+     * silent, un-diagnosable total miss. Confirmed as the likely cause
+     * of a real missed-photo report on 23.8.2026: the log showed
+     * MediaDownloadLearner opening a chat at 12:28, then a real message
+     * to that same chat at 12:47 left zero trace anywhere in the log.
+     *
+     * Fix: after every terminal result (success OR failure/timeout - a
+     * failed action can just as easily leave a chat open), press the
+     * system Home button so WhatsApp goes to the background and stops
+     * owning "the currently open chat". This restores normal WhatsApp
+     * notification behaviour for every chat between automated actions.
+     * A short delay lets the just-performed action (e.g. the send
+     * verification read) finish first; performGlobalAction itself is
+     * fire-and-forget and never throws.
+     */
+    private fun goHomeToCloseWhatsAppChat() {
+        Handler(Looper.getMainLooper()).postDelayed({
+            val ok = performGlobalAction(GLOBAL_ACTION_HOME)
+            EventLog.log("A11y: 🏠 יציאה למסך הבית אחרי סיום הפעולה (סוגר צ'אט פתוח כדי לא לחסום התראות עתידיות)" + if (!ok) " - performGlobalAction החזיר false" else "")
+        }, 400)
+    }
+
     companion object {
         private const val TAG = "WaBridgeA11y"
         private const val SEARCH_TIMEOUT_MS = 15000L
@@ -214,6 +246,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                 EventLog.log("A11y: ❌ Timeout - לא נמצא שדה הודעה/שליחה תוך ${SEARCH_TIMEOUT_MS / 1000} שניות")
                 searching = false
                 SendCoordinator.reportResult(SendCoordinator.Result.TIMEOUT)
+                goHomeToCloseWhatsAppChat()
                 return
             }
 
@@ -338,6 +371,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             EventLog.log("A11y: ❌ כפתור שליחה/הקשה לא הצליחו אחרי $attempt ניסיונות. תוכן entry='$entryNowText' | כפתורים: ${clickables.joinToString(" | ")}")
             searching = false
             SendCoordinator.reportResult(SendCoordinator.Result.FAILED_NO_SEND_BUTTON)
+            goHomeToCloseWhatsAppChat()
             return
         }
 
@@ -396,6 +430,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                 EventLog.log("A11y: ✅ התיבה כבר לא מכילה את ההודעה שלנו (מציגה '$textNow') - השליחה אומתה בפועל")
                 searching = false
                 SendCoordinator.reportResult(SendCoordinator.Result.SUCCESS)
+                goHomeToCloseWhatsAppChat()
             } else {
                 Log.w(TAG, "Compose box still has our exact text after click - not actually sent")
                 EventLog.log("A11y: ❌ [ניסיון $attempt] התיבה עדיין מכילה את אותה הודעה בדיוק אחרי הלחיצה - לא נשלח באמת, מנסה שוב")
@@ -452,6 +487,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                 EventLog.log("A11y-Learn: ❌ Timeout בשלב $learnStage")
                 learning = false
                 LearnCoordinator.reportResult(LearnCoordinator.Result.TIMEOUT)
+                goHomeToCloseWhatsAppChat()
                 return
             }
 
@@ -556,6 +592,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                         EventLog.log("A11y-Learn: ✅ קישור נמצא: $link")
                         learning = false
                         LearnCoordinator.reportResult(LearnCoordinator.Result.SUCCESS, link)
+                        goHomeToCloseWhatsAppChat()
                     } else {
                         handler.postDelayed(this, SEARCH_INTERVAL_MS)
                     }
@@ -588,6 +625,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                 EventLog.log("A11y-PhoneLearn: ❌ Timeout בשלב $phoneLearnStage")
                 phoneLearning = false
                 PhoneLearnCoordinator.reportResult(PhoneLearnCoordinator.Result.TIMEOUT)
+                goHomeToCloseWhatsAppChat()
                 return
             }
 
@@ -630,6 +668,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                         EventLog.log("A11y-PhoneLearn: ✅ מספר נמצא: '$phoneText' -> $digitsOnly")
                         phoneLearning = false
                         PhoneLearnCoordinator.reportResult(PhoneLearnCoordinator.Result.SUCCESS, digitsOnly)
+                        goHomeToCloseWhatsAppChat()
                     } else {
                         handler.postDelayed(this, SEARCH_INTERVAL_MS)
                     }
@@ -672,6 +711,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                 }
                 downloadingMedia = false
                 MediaDownloadCoordinator.reportResult(MediaDownloadCoordinator.Result.TIMEOUT)
+                goHomeToCloseWhatsAppChat()
                 return
             }
 
@@ -886,6 +926,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                         performGlobalAction(GLOBAL_ACTION_BACK)
                         downloadingMedia = false
                         MediaDownloadCoordinator.reportResult(MediaDownloadCoordinator.Result.SUCCESS)
+                        goHomeToCloseWhatsAppChat()
                     } else {
                         EventLog.log("A11y-MediaDownload: ⏳ [+${elapsedSinceTap / 1000}s] הקובץ עדיין לא נמצא בדיסק, ממשיך להמתין...")
                         handler.postDelayed(this, MEDIA_DOWNLOAD_POLL_INTERVAL_MS)
