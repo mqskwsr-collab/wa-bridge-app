@@ -768,6 +768,18 @@ class WaSendAccessibilityService : AccessibilityService() {
     // resolve.
     private val mediaDownloadRunnable: Runnable = object : Runnable {
         override fun run() {
+            // FIX (23.8.2026, real build failure): a Kotlin property
+            // genuinely cannot reference itself BY NAME while it's still
+            // being initialized - even with an explicit type, that only
+            // fixed the earlier "recursive type checking" error and
+            // exposed the real one underneath: "Variable
+            // 'mediaDownloadRunnable' must be initialized" (confirmed by
+            // an actual CI build run). `this`, unlike the property name,
+            // IS valid here because run() only executes AFTER
+            // construction finished - capturing it into a local lets the
+            // swipe-completion lambda below re-post to it without ever
+            // touching the outer property name.
+            val self = this
             val job = MediaDownloadCoordinator.current
             if (job == null) {
                 downloadingMedia = false
@@ -1122,7 +1134,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                         // load a moment to settle before immediately
                         // hunting for "More options" on what might still
                         // be mid-transition.
-                        handler.postDelayed(mediaDownloadRunnable, 900L)
+                        handler.postDelayed(self, 900L)
                     }
                 }
             }
