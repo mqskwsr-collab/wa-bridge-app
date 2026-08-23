@@ -163,6 +163,10 @@ class WaSendAccessibilityService : AccessibilityService() {
     // (either tapped a save item, or gave up after one attempt - either
     // way only tried once per download job).
     private var saveMenuAttemptStep = 0
+    // FIX (23.8.2026, hidden-toolbar theory): whether a reveal-tap has
+    // already been tried for the CURRENTLY-displayed album item - reset
+    // per item (init + each swipe) so every item gets exactly one try.
+    private var hasTriedRevealTapForItem = false
 
     private val handler = Handler(Looper.getMainLooper())
     private var searching = false
@@ -298,6 +302,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             hasDumpedMenuTree = false
             hasDumpedAfterSaveTapTree = false
             saveMenuAttemptStep = 0
+            hasTriedRevealTapForItem = false
             lastMediaDownloadDumpTime = 0L
             dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
             swipesAttempted = 0
@@ -969,8 +974,40 @@ class WaSendAccessibilityService : AccessibilityService() {
                             saveMenuAttemptStep = 1
                             handler.postDelayed(this, 700L)
                             return
+                        } else if (!hasTriedRevealTapForItem) {
+                            // FIX (23.8.2026, hidden-toolbar theory): "More
+                            // options" has been consistently ABSENT from
+                            // every real on-device tree dump so far - not
+                            // flaky, always exactly the same 5 nodes (back +
+                            // 2× "enlarge image" region). Many full-screen
+                            // image viewers hide their toolbar until the
+                            // image itself is tapped once (a "tap to toggle
+                            // chrome" pattern). UNVERIFIED - this is the
+                            // most concrete untested theory for why full
+                            // albums have repeatedly timed out at 0 files
+                            // found even with the swipe/bounds fixes
+                            // working. Try exactly ONE plain tap (not a
+                            // swipe - 50ms, no movement) in the middle of
+                            // the image area, then re-search once, before
+                            // falling back to the old give-up path.
+                            hasTriedRevealTapForItem = true
+                            EventLog.log("A11y-MediaDownload: 👆 לא נמצא כפתור \"More options\" - מנסה הקשה בודדת על התמונה לחשיפת סרגל כלים נסתר")
+                            val bounds = currentViewerBounds ?: findImageViewerBounds(root)
+                            if (bounds != null) {
+                                val tapX = bounds.centerX().toFloat()
+                                val tapY = bounds.centerY().toFloat()
+                                val tapPath = Path().apply { moveTo(tapX, tapY) }
+                                val tapGesture = GestureDescription.Builder()
+                                    .addStroke(GestureDescription.StrokeDescription(tapPath, 0, 50))
+                                    .build()
+                                dispatchGesture(tapGesture, null, null)
+                            } else {
+                                EventLog.log("A11y-MediaDownload: ⚠️ אין גבולות מסך ידועים - מדלג על הקשת החשיפה")
+                            }
+                            handler.postDelayed(this, 500L)
+                            return
                         } else {
-                            EventLog.log("A11y-MediaDownload: ⚠️ לא נמצא כפתור \"More options\" - מדלג ישר להמתנה")
+                            EventLog.log("A11y-MediaDownload: ⚠️ לא נמצא כפתור \"More options\" גם אחרי הקשת חשיפה - מדלג ישר להמתנה")
                             saveMenuAttemptStep = 2
                         }
                     } else if (saveMenuAttemptStep == 1) {
@@ -1138,6 +1175,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                     performSwipeGesture(bounds, swipeLeftToRight) {
                         swipesAttempted++
                         saveMenuAttemptStep = 0
+                        hasTriedRevealTapForItem = false
                         pollCyclesOnCurrentItem = 0
                         // Only re-dump the diagnostic trees for the first
                         // swipe - repeating a full tree dump per item
@@ -1215,24 +1253,46 @@ class WaSendAccessibilityService : AccessibilityService() {
 
     /**
      * Finds the on-screen bounds of the currently-displayed full-screen
-     * image, to know where to swipe. Looks for the container node whose
-     * own label/content-description matches IMAGE_VIEWER_CONTAINER_LABEL_REGEX
-     * (seen on-device as a ViewGroup, label='הגדלת התמונה', spanning
-     * almost the full screen). Returns null if not found - the caller
-     * falls back to a generous full-width band in that case.
+     * image, to know where to swipe. Looks for nodes whose own label/
+     * content-description matches IMAGE_VIEWER_CONTAINER_LABEL_REGEX
+     * (seen on-device as both a small top-bar zoom button AND a large
+     * ViewGroup spanning most of the screen - WhatsApp reuses the same
+     * "‏הגדלת התמונה" / "enlarge image" label for both). Returns the
+     * LARGEST matching region, not simply the first one found.
+     *
+     * FIX (23.8.2026, swiped-wrong-region bug): the original version
+     * returned the FIRST match in document order, which the on-device
+     * dump shows is consistently the small ~144px-tall top-bar button
+     * (bounds like (350,48)-(1250,192)), appearing in the tree BEFORE
+     * the actual full-size image ViewGroup (bounds like (0,208)-(1600,900))
+     * that comes right after it as a sibling. Confirmed as the likely
+     * cause of a real-device test where 2 swipes (with a direction flip)
+     * never once produced a new file - MediaStore kept re-finding the
+     * SAME single already-downloaded image the entire time, meaning the
+     * swipe was very likely never actually landing on the real image
+     * content at all.
      */
     private fun findImageViewerBounds(root: AccessibilityNodeInfo): Rect? {
-        val label = root.contentDescription?.toString() ?: ""
-        if (IMAGE_VIEWER_CONTAINER_LABEL_REGEX.containsMatchIn(label)) {
-            val r = Rect()
-            root.getBoundsInScreen(r)
-            return r
+        var best: Rect? = null
+        var bestArea = 0L
+
+        fun visit(node: AccessibilityNodeInfo) {
+            val label = node.contentDescription?.toString() ?: ""
+            if (IMAGE_VIEWER_CONTAINER_LABEL_REGEX.containsMatchIn(label)) {
+                val r = Rect()
+                node.getBoundsInScreen(r)
+                val area = r.width().toLong() * r.height().toLong()
+                if (area > bestArea) {
+                    bestArea = area
+                    best = r
+                }
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { visit(it) }
+            }
         }
-        for (i in 0 until root.childCount) {
-            val child = root.getChild(i) ?: continue
-            findImageViewerBounds(child)?.let { return it }
-        }
-        return null
+        visit(root)
+        return best
     }
 
     private fun findBottommostImageNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {

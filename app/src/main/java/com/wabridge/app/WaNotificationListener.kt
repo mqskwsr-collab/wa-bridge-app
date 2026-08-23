@@ -46,9 +46,30 @@ class WaNotificationListener : NotificationListenerService() {
         // window, mirroring the practical effect of MacroDroid's
         // "Notification Received" trigger which only fires on genuinely
         // new content.
-        private var lastKey: String? = null
-        private var lastTimestamp: Long = 0L
+        //
+        // FIX (23.8.2026, interleaved-duplicate bug): a single lastKey/
+        // lastTimestamp slot can only catch an EXACT repeat of the
+        // IMMEDIATELY PRECEDING notification. Real on-device log (23.8
+        // 23:19) showed WhatsApp firing an interleaved A,B,A,B sequence
+        // for one logical message - "3 תמונות" then "2 הודעות חדשות" then
+        // "3 תמונות" again then "2 הודעות חדשות" again - all within under
+        // a second. By the time the 2nd "3 תמונות" arrived, lastKey had
+        // already been overwritten by "2 הודעות חדשות", so the equality
+        // check silently failed and all 4 got forwarded as if genuinely
+        // new (4 emails for 1 real message). Replaced with a short bounded
+        // history of recent keys, pruned to DEDUPE_WINDOW_MS, checked by
+        // membership instead of equality to only the latest one - this
+        // catches a duplicate no matter how many OTHER distinct
+        // notifications were interleaved in between, as long as it's
+        // still within the window.
+        private val recentKeys = ArrayDeque<Pair<String, Long>>()
         private const val DEDUPE_WINDOW_MS = 3000L
+        private const val RECENT_KEYS_MAX = 8
+        // FIX (23.8.2026, redundant-empty-email bug): matches WhatsApp's
+        // bare unread-count summary text, e.g. "‏2 הודעות חדשות" / "2 new
+        // messages" - see the filter above for why this is always safe
+        // to drop rather than forward.
+        private val GENERIC_UNREAD_COUNT_REGEX = Regex("""^\d+\s+(הודעות חדשות|new messages?)$""", RegexOption.IGNORE_CASE)
 
         // FIX (23.8.2026, multi-media): the text-based dedupe above keys
         // on canonicalTarget+canonicalMessage, but WhatsApp posts SEVERAL
@@ -170,6 +191,26 @@ class WaNotificationListener : NotificationListenerService() {
             return
         }
 
+        // FIX (23.8.2026, redundant-empty-email bug): WhatsApp always
+        // fires a second, completely generic "N הודעות חדשות" / "N new
+        // messages" notification alongside every real per-chat one -
+        // confirmed across EVERY log gathered in this whole debugging
+        // session, successful or not: this text never carries usable
+        // content (GroupDetect can't classify it, PhoneExtract can never
+        // extract a MessagingStyle from it), and it always produced its
+        // own empty mediaCount:0 email even when the real notification
+        // right next to it was processed correctly. Unlike the dedup
+        // fix above (which only catches EXACT repeats), this is a
+        // distinct, always-different text that legitimately isn't a
+        // duplicate of anything - it's simply never useful on its own,
+        // so it's filtered here rather than sent onward as a real event.
+        val cleanedForCountCheck = Utils.stripBidiMarks(text).trim()
+        if (GENERIC_UNREAD_COUNT_REGEX.matches(cleanedForCountCheck)) {
+            Log.d(TAG, "Ignoring generic unread-count notification (no real content): $cleanedForCountCheck")
+            EventLog.log("Listener: ⏭️ מתעלם - התראת ספירת הודעות גנרית בלי תוכן ('$cleanedForCountCheck')")
+            return
+        }
+
         val now = System.currentTimeMillis()
 
         // Detect group vs private using Android's own MessagingStyle flag
@@ -219,13 +260,20 @@ class WaNotificationListener : NotificationListenerService() {
             Utils.stripBidiMarks(text).trim()
         }
         val dedupeKey = "$canonicalTarget|$canonicalMessage"
-        if (dedupeKey == lastKey && (now - lastTimestamp) < DEDUPE_WINDOW_MS) {
-            Log.d(TAG, "Ignoring canonical duplicate notification within dedupe window: $dedupeKey")
-            EventLog.log("Listener: ⏭️ מתעלם - אותה הודעה כבר התקבלה בפורמט התראה נוסף")
-            return
+        synchronized(recentKeys) {
+            while (recentKeys.isNotEmpty() && (now - recentKeys.first().second) >= DEDUPE_WINDOW_MS) {
+                recentKeys.removeFirst()
+            }
+            if (recentKeys.any { it.first == dedupeKey }) {
+                Log.d(TAG, "Ignoring canonical duplicate notification within dedupe window: $dedupeKey")
+                EventLog.log("Listener: ⏭️ מתעלם - אותה הודעה כבר התקבלה בפורמט התראה נוסף")
+                return
+            }
+            recentKeys.addLast(dedupeKey to now)
+            while (recentKeys.size > RECENT_KEYS_MAX) {
+                recentKeys.removeFirst()
+            }
         }
-        lastKey = dedupeKey
-        lastTimestamp = now
 
         // Capture the notification's own "Reply" action (RemoteInput),
         // if present - this lets PollingService send the eventual email
