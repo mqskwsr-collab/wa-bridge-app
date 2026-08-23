@@ -50,8 +50,23 @@ object WaMediaLocator {
     private const val TAG = "WaBridgeMedia"
 
     private val CANDIDATE_BASE_PATHS = listOf(
-        "Android/media/com.whatsapp/WhatsApp/Media", // new (post-2021 scoped storage)
-        "WhatsApp/Media"                              // legacy (storage root)
+        "Android/media/com.whatsapp/WhatsApp/Media", // new (post-2021 scoped storage) - WhatsApp's own auto-download cache
+        "WhatsApp/Media",                              // legacy (storage root) - WhatsApp's own auto-download cache
+        // FIX (22.8.2026): on-device log confirmed the accessibility
+        // flow now genuinely finds and taps the real "שמירה"/"Save"
+        // menu item (see FIX51/52 doc comments in
+        // WaSendAccessibilityService) - but STILL nothing showed up in
+        // either path above afterward. That's expected: a manual "Save"
+        // from the full-screen viewer's overflow menu writes a COPY to
+        // the device's regular Gallery, a different location entirely
+        // from WhatsApp's own auto-download cache (which is what the
+        // two paths above are). Gallery saves commonly land under
+        // Pictures/WhatsApp Images or DCIM/WhatsApp Images depending on
+        // Android version/OEM - both are tried now. (For non-image
+        // types these combine into paths that don't exist, e.g.
+        // "Pictures/WhatsApp Voice Notes" - harmless, just skipped.)
+        "Pictures",
+        "DCIM"
     )
     private const val SUBFOLDER_IMAGES = "WhatsApp Images"
     private const val SUBFOLDER_VIDEO = "WhatsApp Video"
@@ -113,16 +128,55 @@ object WaMediaLocator {
         }
 
         val root = Environment.getExternalStorageDirectory()
-        var dir: File? = null
+        // FIX (22.8.2026): this used to stop at the FIRST candidate
+        // folder that merely EXISTED (isDirectory), even if nothing in
+        // it matched - meaning once the legacy WhatsApp/Media path was
+        // found to exist (which it always was, with old cached files),
+        // no other candidate (including the newly-added Gallery paths
+        // above) would ever even get checked. Now checks every existing
+        // candidate folder and picks the best (newest) match across all
+        // of them, so a real match in a later candidate isn't hidden by
+        // an earlier candidate that merely exists but has nothing recent.
+        val triedDirs = mutableListOf<File>()
+        var bestFile: File? = null
+        var bestDir: File? = null
+
         for (basePath in CANDIDATE_BASE_PATHS) {
-            val candidate = File(root, "$basePath/$subfolder")
-            if (candidate.isDirectory) {
-                dir = candidate
-                break
+            val candidateDir = File(root, "$basePath/$subfolder")
+            if (!candidateDir.isDirectory) continue
+            triedDirs.add(candidateDir)
+
+            val filesHere = candidateDir.listFiles { f -> f.isFile } ?: emptyArray()
+            if (filesHere.isEmpty()) {
+                // DIAGNOSTIC (21.8.2026): on-device logs show this folder
+                // reporting 0 files EVERY time, including for files that are
+                // NOT new (72 pre-existing files confirmed present via a
+                // separate file manager app, some days old) - so this isn't
+                // "new file not visible yet", listFiles() is failing to see
+                // ANY of the directory's contents. That points at a
+                // permission problem masquerading as an empty folder, not a
+                // path or timing problem. Log the raw signals needed to tell
+                // apart the possible causes: is isExternalStorageManager()
+                // actually true, can we even read/execute the dir, and does
+                // the plain String[] list() (different underlying code path
+                // than listFiles()) agree or disagree with listFiles().
+                EventLog.log(
+                    "Media: 🔎 אבחון הרשאות (${candidateDir.absolutePath}) - sdkInt=${Build.VERSION.SDK_INT} isExternalStorageManager=${isAvailable(context)} " +
+                        "dir.exists=${candidateDir.exists()} dir.canRead=${candidateDir.canRead()} dir.canExecute=${candidateDir.canExecute()} " +
+                        "list()=${candidateDir.list()?.size ?: "null"} listFiles()=${filesHere.size}"
+                )
+            }
+
+            val matchHere = filesHere
+                .filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= matchWindowMs }
+                .maxByOrNull { it.lastModified() }
+            if (matchHere != null && (bestFile == null || matchHere.lastModified() > bestFile!!.lastModified())) {
+                bestFile = matchHere
+                bestDir = candidateDir
             }
         }
 
-        if (dir == null) {
+        if (triedDirs.isEmpty()) {
             val tried = CANDIDATE_BASE_PATHS.joinToString(" , ") { File(root, "$it/$subfolder").absolutePath }
             Log.w(TAG, "Media folder not found in any candidate path: $tried")
             EventLog.log("Media: ⚠️ תיקיית מדיה לא נמצאה באף אחד מהנתיבים: $tried")
@@ -130,36 +184,15 @@ object WaMediaLocator {
             return null
         }
 
-        val candidates = dir.listFiles { f -> f.isFile } ?: emptyArray()
-        if (candidates.isEmpty()) {
-            // DIAGNOSTIC (21.8.2026): on-device logs show this folder
-            // reporting 0 files EVERY time, including for files that are
-            // NOT new (72 pre-existing files confirmed present via a
-            // separate file manager app, some days old) - so this isn't
-            // "new file not visible yet", listFiles() is failing to see
-            // ANY of the directory's contents. That points at a
-            // permission problem masquerading as an empty folder, not a
-            // path or timing problem. Log the raw signals needed to tell
-            // apart the possible causes: is isExternalStorageManager()
-            // actually true, can we even read/execute the dir, and does
-            // the plain String[] list() (different underlying code path
-            // than listFiles()) agree or disagree with listFiles().
-            EventLog.log(
-                "Media: 🔎 אבחון הרשאות - sdkInt=${Build.VERSION.SDK_INT} isExternalStorageManager=${isAvailable(context)} " +
-                    "dir.exists=${dir.exists()} dir.canRead=${dir.canRead()} dir.canExecute=${dir.canExecute()} " +
-                    "list()=${dir.list()?.size ?: "null"} listFiles()=${candidates.size}"
-            )
-        }
-        val best = candidates
-            .filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= matchWindowMs }
-            .maxByOrNull { it.lastModified() }
+        val best = bestFile
 
         if (best == null) {
-            Log.w(TAG, "No recent file matched in ${dir.absolutePath} within ${matchWindowMs}ms of $notificationTimeMs")
-            EventLog.log("Media: ⚠️ לא נמצא קובץ תואם בזמן ב-\"${dir.absolutePath}\"")
-            logCandidateTimings(dir, candidates, notificationTimeMs)
+            Log.w(TAG, "No recent file matched in any of: ${triedDirs.joinToString(" , ") { it.absolutePath }} within ${matchWindowMs}ms of $notificationTimeMs")
+            EventLog.log("Media: ⚠️ לא נמצא קובץ תואם בזמן באף אחת מ-${triedDirs.size} תיקיות שנבדקו")
+            triedDirs.forEach { d -> logCandidateTimings(d, d.listFiles { f -> f.isFile } ?: emptyArray(), notificationTimeMs) }
             return null
         }
+        val dir = bestDir!!
 
         val mimeType = guessMimeType(best.name)
         Log.i(TAG, "Matched media file: ${best.absolutePath} (mime=$mimeType)")
