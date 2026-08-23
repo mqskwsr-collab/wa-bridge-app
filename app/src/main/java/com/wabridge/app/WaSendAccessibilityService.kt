@@ -753,7 +753,20 @@ class WaSendAccessibilityService : AccessibilityService() {
      * finish writing to disk, then presses back so WhatsApp doesn't sit
      * on the viewer indefinitely.
      */
-    private val mediaDownloadRunnable = object : Runnable {
+    // FIX (23.8.2026, full-album swipe build error): explicit `: Runnable`
+    // type annotation is REQUIRED here, not stylistic - once the swipe
+    // stage started referencing this property BY NAME from inside its
+    // own run() body (handler.postDelayed(mediaDownloadRunnable, ...)),
+    // Kotlin's type inference hit a genuine circular dependency (to
+    // resolve the symbol `mediaDownloadRunnable` it needs the property's
+    // type, which without an explicit annotation is inferred FROM the
+    // initializer that itself references the property) - confirmed via
+    // a real CI build failure: "Type checking has run into a recursive
+    // problem" pointing exactly at that self-reference line. The old
+    // code only ever referred to itself via `this` inside run(), which
+    // never triggered this - `this` doesn't need the property's type to
+    // resolve.
+    private val mediaDownloadRunnable: Runnable = object : Runnable {
         override fun run() {
             val job = MediaDownloadCoordinator.current
             if (job == null) {
