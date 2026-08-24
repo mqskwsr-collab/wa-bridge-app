@@ -136,7 +136,21 @@ class WaSendAccessibilityService : AccessibilityService() {
         // analogous - "הפעלת הסרטון"/"play video") since MediaClassifier
         // also handles VIDEO; safe to leave in even if never confirmed,
         // since it only narrows what counts as a match.
-        private val MEDIA_BUBBLE_DESC_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image|play video|הפעלת הסרטון)""", RegexOption.IGNORE_CASE)
+        // FIX (24.8.2026, video-tap-target bug): confirmed on-device -
+        // this regex previously matched ONLY the small inline "play"
+        // icon overlay on a video thumbnail ("הפעלת הסרטון"/"play video"),
+        // never the actual bubble container ("צפייה בסרטון, X מתוך Y" -
+        // WhatsApp's video equivalent of images' "הצגת תמונה, X מתוך Y").
+        // Tapping the play icon just starts INLINE playback within the
+        // chat - it never opens the full-screen viewer, so the
+        // subsequent "More options" search kept finding the ordinary
+        // CHAT-level overflow menu (mute/theme/disappearing messages)
+        // instead of a per-video one, and no save option ever existed
+        // there to find. Replaced "play video"/"הפעלת הסרטון" (which
+        // pointed at the wrong element) with "צפייה בסרטון"/"viewing
+        // video" (the real bubble container, matching the same "X מתוך
+        // Y" pattern ALBUM_SIZE_ITEM_OF_TOTAL_REGEX already expects).
+        private val MEDIA_BUBBLE_DESC_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image|צפייה בסרטון|viewing video)""", RegexOption.IGNORE_CASE)
         // FIX (22.8.2026): the post-tap tree dump (see FIX50) confirmed
         // a REAL screen navigation happens (back/star/forward/edit/more-
         // options icons, reaction row - genuinely WhatsApp's full-screen
