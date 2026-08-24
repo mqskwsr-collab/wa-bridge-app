@@ -141,6 +141,18 @@ class WaNotificationListener : NotificationListenerService() {
         // it mainly exists to gracefully skip oversized videos rather
         // than attempt (and likely fail) a huge upload.
         private const val MEDIA_SIZE_CAP_BYTES = 12L * 1024 * 1024 // 12MB
+        // FIX (24.8.2026, large-media-as-Drive-link): previously files
+        // over MEDIA_SIZE_CAP_BYTES were dropped entirely with no way for
+        // the recipient to ever get them. Now MEDIA_SIZE_CAP_BYTES is the
+        // threshold for a DIRECT Gmail attachment (unchanged); files
+        // between that and this higher hard ceiling are still sent (their
+        // base64 bytes included) but flagged "tooLargeToAttachDirectly"
+        // so Code.gs uploads them to Drive and puts a share link in the
+        // email body instead of attaching them. Only files bigger than
+        // THIS are truly dropped - kept generous but still comfortably
+        // under Apps Script's doPost payload ceiling even after base64's
+        // ~37% size inflation.
+        private const val MEDIA_HARD_DROP_CAP_BYTES = 30L * 1024 * 1024 // 30MB
     }
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -490,7 +502,10 @@ class WaNotificationListener : NotificationListenerService() {
             // Filter out anything we've already attached+sent very
             // recently (belt-and-suspenders against the event-level
             // dedupe above missing a case - see recentlySentFiles doc
-            // comment) and anything over the size cap.
+            // comment) and anything over the hard drop cap. Files between
+            // MEDIA_SIZE_CAP_BYTES and MEDIA_HARD_DROP_CAP_BYTES are kept
+            // here - they're routed to Drive-link instead of a direct
+            // attachment further down, not dropped.
             val usable = found.filter { fm ->
                 val path = fm.file.absolutePath
                 when {
@@ -498,10 +513,10 @@ class WaNotificationListener : NotificationListenerService() {
                         EventLog.log("Listener: ⏭️ מדלג - קובץ זה כבר נשלח לאחרונה: ${fm.file.name}")
                         false
                     }
-                    fm.file.length() > MEDIA_SIZE_CAP_BYTES -> {
+                    fm.file.length() > MEDIA_HARD_DROP_CAP_BYTES -> {
                         val mb = fm.file.length() / (1024 * 1024)
-                        Log.w(TAG, "Media file too large to attach: ${fm.file.name} (${mb}MB)")
-                        EventLog.log("Listener: ⚠️ קובץ המדיה גדול מדי לצירוף אוטומטי (${mb}MB) - מדלג")
+                        Log.w(TAG, "Media file too large even for a Drive link: ${fm.file.name} (${mb}MB)")
+                        EventLog.log("Listener: ⚠️ קובץ המדיה גדול מדי אפילו לקישור Drive (${mb}MB, תקרה: ${MEDIA_HARD_DROP_CAP_BYTES / (1024 * 1024)}MB) - מדלג")
                         false
                     }
                     else -> true
@@ -525,10 +540,12 @@ class WaNotificationListener : NotificationListenerService() {
             usable.forEachIndexed { idx, fm ->
                 val bytes = fm.file.readBytes()
                 val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                val tooLargeToAttachDirectly = fm.file.length() > MEDIA_SIZE_CAP_BYTES
                 val item = JSONObject().apply {
                     put("mediaBase64", base64)
                     put("mediaMimeType", fm.mimeType)
                     put("mediaFileName", fm.file.name)
+                    put("tooLargeToAttachDirectly", tooLargeToAttachDirectly)
                 }
                 itemsJson.put(item)
                 markSent(fm.file.absolutePath, now)
@@ -538,8 +555,9 @@ class WaNotificationListener : NotificationListenerService() {
                     body.put("mediaMimeType", fm.mimeType)
                     body.put("mediaFileName", fm.file.name)
                 }
-                Log.i(TAG, "Attaching media (${idx + 1}/${usable.size}): ${fm.file.name} (${bytes.size} bytes, ${fm.mimeType})")
-                EventLog.log("Listener: 📎 מצרף קובץ מדיה (${idx + 1}/${usable.size}): ${fm.file.name} (${bytes.size / 1024}KB)")
+                val sizeLabel = if (tooLargeToAttachDirectly) "${bytes.size / 1024}KB, יעלה כקישור Drive" else "${bytes.size / 1024}KB"
+                Log.i(TAG, "Attaching media (${idx + 1}/${usable.size}): ${fm.file.name} (${bytes.size} bytes, ${fm.mimeType}, tooLargeToAttachDirectly=$tooLargeToAttachDirectly)")
+                EventLog.log("Listener: 📎 מצרף קובץ מדיה (${idx + 1}/${usable.size}): ${fm.file.name} ($sizeLabel)")
             }
             body.put("mediaItems", itemsJson)
             body.put("mediaItemCount", usable.size)
