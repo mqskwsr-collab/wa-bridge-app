@@ -170,6 +170,16 @@ class WaSendAccessibilityService : AccessibilityService() {
         // and bounds spanning almost the whole screen) - used to know
         // WHERE on screen to swipe. Falls back to a generous full-width
         // band if this isn't found for some reason.
+        // FIX (24.8.2026, video-viewer-bounds gap): the video full-screen
+        // viewer's controls are labeled 'Pause' / '‏הפעלה' (play), NEVER
+        // 'הגדלת התמונה' like the photo viewer - but those are small,
+        // centered playback-control overlays (~140px), not a real large
+        // viewer region, so matching them here would make findImageViewerBounds
+        // return a too-small region for SWIPING even though it's fine
+        // for a center reveal-tap. Left un-matched here on purpose;
+        // instead both call sites below now share the same generic
+        // full-width fallback band when this regex finds nothing, which
+        // is the actual fix (see hasTriedRevealTapForItem branch).
         private val IMAGE_VIEWER_CONTAINER_LABEL_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image)""", RegexOption.IGNORE_CASE)
     }
 
@@ -1014,18 +1024,31 @@ class WaSendAccessibilityService : AccessibilityService() {
                             // falling back to the old give-up path.
                             hasTriedRevealTapForItem = true
                             EventLog.log("A11y-MediaDownload: 👆 לא נמצא כפתור \"More options\" - מנסה הקשה בודדת על התמונה לחשיפת סרגל כלים נסתר")
+                            // FIX (24.8.2026, video reveal-tap-bounds gap):
+                            // confirmed on-device across multiple video
+                            // tests - findImageViewerBounds always returns
+                            // null for a video (its player controls are
+                            // labeled 'Pause'/'הפעלה', never 'הגדלת
+                            // התמונה'), so this reveal-tap was skipped
+                            // entirely on every video item after the
+                            // first, and "More options" was then never
+                            // found for it - the item just sat unsaved for
+                            // its whole settle-time budget every time.
+                            // The swipe gesture's own call site already
+                            // had a generic full-width fallback band for
+                            // exactly this null case; this one didn't.
+                            // Now shares the identical fallback.
+                            val screenWidthForTap = resources.displayMetrics.widthPixels
+                            val screenHeightForTap = resources.displayMetrics.heightPixels
                             val bounds = currentViewerBounds ?: findImageViewerBounds(root)
-                            if (bounds != null) {
-                                val tapX = bounds.centerX().toFloat()
-                                val tapY = bounds.centerY().toFloat()
-                                val tapPath = Path().apply { moveTo(tapX, tapY) }
-                                val tapGesture = GestureDescription.Builder()
-                                    .addStroke(GestureDescription.StrokeDescription(tapPath, 0, 50))
-                                    .build()
-                                dispatchGesture(tapGesture, null, null)
-                            } else {
-                                EventLog.log("A11y-MediaDownload: ⚠️ אין גבולות מסך ידועים - מדלג על הקשת החשיפה")
-                            }
+                                ?: Rect(0, screenHeightForTap / 5, screenWidthForTap, screenHeightForTap * 4 / 5)
+                            val tapX = bounds.centerX().toFloat()
+                            val tapY = bounds.centerY().toFloat()
+                            val tapPath = Path().apply { moveTo(tapX, tapY) }
+                            val tapGesture = GestureDescription.Builder()
+                                .addStroke(GestureDescription.StrokeDescription(tapPath, 0, 50))
+                                .build()
+                            dispatchGesture(tapGesture, null, null)
                             handler.postDelayed(this, 500L)
                             return
                         } else {
