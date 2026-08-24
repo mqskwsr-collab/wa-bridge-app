@@ -1044,8 +1044,23 @@ class WaSendAccessibilityService : AccessibilityService() {
                             val screenHeightForTap = resources.displayMetrics.heightPixels
                             val bounds = currentViewerBounds ?: findImageViewerBounds(root)
                                 ?: Rect(0, screenHeightForTap / 5, screenWidthForTap, screenHeightForTap * 4 / 5)
+                            // FIX (24.8.2026, video chrome-reveal bug): the
+                            // on-device dump confirmed the WHOLE toolbar
+                            // (back/star/forward/edit/More options - 16
+                            // clickable nodes on item 1) disappears after
+                            // swiping to the next item (only 2-3 nodes
+                            // remain: just the Play/Pause overlay). A tap
+                            // dead-center almost certainly hits that
+                            // Play/Pause control directly (it sits at
+                            // screen-center in every dump) and toggles
+                            // playback instead of the toolbar. Tapping the
+                            // upper quarter of the video area instead -
+                            // clearly outside the centered Play/Pause hit
+                            // box - to test whether that's genuinely a
+                            // separate "reveal chrome" gesture in
+                            // WhatsApp's video player.
                             val tapX = bounds.centerX().toFloat()
-                            val tapY = bounds.centerY().toFloat()
+                            val tapY = (bounds.top + bounds.height() / 4).toFloat()
                             val tapPath = Path().apply { moveTo(tapX, tapY) }
                             val tapGesture = GestureDescription.Builder()
                                 .addStroke(GestureDescription.StrokeDescription(tapPath, 0, 50))
