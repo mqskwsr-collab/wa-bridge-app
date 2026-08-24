@@ -191,6 +191,7 @@ class WaSendAccessibilityService : AccessibilityService() {
     // already been tried for the CURRENTLY-displayed album item - reset
     // per item (init + each swipe) so every item gets exactly one try.
     private var hasTriedRevealTapForItem = false
+    private var hasDumpedAfterRevealTapTree = false
 
     private val handler = Handler(Looper.getMainLooper())
     private var searching = false
@@ -335,6 +336,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             hasDumpedAfterSaveTapTree = false
             saveMenuAttemptStep = 0
             hasTriedRevealTapForItem = false
+            hasDumpedAfterRevealTapTree = false
             lastMediaDownloadDumpTime = 0L
             dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
             swipesAttempted = 0
@@ -1053,6 +1055,27 @@ class WaSendAccessibilityService : AccessibilityService() {
                             return
                         } else {
                             EventLog.log("A11y-MediaDownload: ⚠️ לא נמצא כפתור \"More options\" גם אחרי הקשת חשיפה - מדלג ישר להמתנה")
+                            // FIX (24.8.2026, video reveal-tap investigation):
+                            // the reveal-tap now genuinely dispatches (the
+                            // earlier "no known bounds" bug is fixed), but
+                            // "More options" still isn't found afterward for
+                            // video items past the first. One concrete
+                            // suspicion: the fallback tap point (screen
+                            // center) may coincide almost exactly with the
+                            // video's own Pause/Play control (seen on-device
+                            // at roughly screen-center), so the tap might be
+                            // toggling PLAYBACK instead of revealing any
+                            // toolbar. Dumping the full tree right here (once
+                            // per item) shows definitively what's actually on
+                            // screen after the failed reveal-tap - whether
+                            // Pause flipped to Play (confirming the toggle
+                            // theory) or the screen looks unchanged (pointing
+                            // elsewhere entirely) - rather than guessing again.
+                            if (!hasDumpedAfterRevealTapTree) {
+                                hasDumpedAfterRevealTapTree = true
+                                EventLog.log("A11y-MediaDownload: 🌳 אבחון מסך אחרי הקשת החשיפה הכושלת:")
+                                dumpFullNodeTree(root)
+                            }
                             saveMenuAttemptStep = 2
                         }
                     } else if (saveMenuAttemptStep == 1) {
@@ -1228,6 +1251,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                         swipesAttempted++
                         saveMenuAttemptStep = 0
                         hasTriedRevealTapForItem = false
+                        hasDumpedAfterRevealTapTree = false
                         pollCyclesOnCurrentItem = 0
                         // Only re-dump the diagnostic trees for the first
                         // swipe - repeating a full tree dump per item
