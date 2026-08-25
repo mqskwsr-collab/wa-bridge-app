@@ -912,7 +912,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                         hasDumpedFullMediaTree = true
                         dumpFullNodeTree(root)
                     }
-                    val bubble = findBottommostImageNode(root)
+                    val bubble = findBottommostImageNode(root, job.mediaType)
                     if (bubble != null) {
                         Log.i(TAG, "Found media bubble - tapping to force download")
                         // DIAGNOSTIC (21.8.2026): log exactly WHAT is
@@ -1386,8 +1386,30 @@ class WaSendAccessibilityService : AccessibilityService() {
         return best
     }
 
-    private fun findBottommostImageNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+    /**
+     * FIX (25.8.2026, phantom-stale-bubble bug): confirmed on-device -
+     * for a media type this generic "bottommost ImageView" fallback was
+     * never actually validated against (voice notes: real log showed
+     * the app confidently tapping a leftover VIDEO bubble from an
+     * earlier, unrelated message still visible in the same scrolled
+     * chat, then spending its entire download budget acting on that
+     * wrong element - producing a misleading result where an email said
+     * "there's a recording" but zero bytes of it ever arrived, with no
+     * error surfaced anywhere). The fallback is only safe for media
+     * types we've actually confirmed use an ImageView-classed bubble
+     * (IMAGE, VIDEO - both verified via real on-device dumps this whole
+     * debugging session). For anything else, silently grabbing "the
+     * bottommost ImageView" risks grabbing a completely unrelated
+     * element rather than the intended one, so it's skipped entirely -
+     * better to cleanly report "not supported yet" than to confidently
+     * act on the wrong bubble.
+     */
+    private fun findBottommostImageNode(root: AccessibilityNodeInfo, mediaType: MediaClassifier.MediaType): AccessibilityNodeInfo? {
         findNodeByDescription(root)?.let { return it }
+        if (mediaType != MediaClassifier.MediaType.IMAGE && mediaType != MediaClassifier.MediaType.VIDEO) {
+            EventLog.log("A11y-MediaDownload: ⚠️ סוג המדיה (${mediaType.name}) עדיין לא נתמך לאיתור בועה אמין - מדלג במקום לנחש")
+            return null
+        }
         return findBottommostImageViewClassed(root)
     }
 
