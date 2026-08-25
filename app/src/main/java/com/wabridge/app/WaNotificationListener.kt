@@ -382,15 +382,42 @@ class WaNotificationListener : NotificationListenerService() {
     }
 
     
+    /**
+     * Streams raw file bytes as base64 directly into [writer], never
+     * holding more than one chunk in memory. Reads in multiples of 3
+     * bytes so every chunk-but-the-last encodes to a clean 4-char-per-3-byte
+     * base64 block with no padding - simple string concatenation of the
+     * chunks (which is exactly what writing them one after another to the
+     * stream does) reconstructs the identical base64 a single encodeToString()
+     * call over the whole file would have produced. Only the final,
+     * possibly-shorter chunk gets padding, which Base64.encodeToString
+     * handles correctly on its own.
+     */
+    private fun writeStreamedBase64(file: File, writer: java.io.Writer) {
+        val buffer = ByteArray(3 * 65536) // 192KB raw per chunk (multiple of 3)
+        file.inputStream().use { input ->
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                val encoded = android.util.Base64.encodeToString(buffer, 0, read, android.util.Base64.NO_WRAP)
+                writer.write(encoded)
+            }
+        }
+    }
+
     private fun postToAppsScript(webAppUrl: String, title: String, text: String, phone: String?, isGroup: Boolean?, postTimeMs: Long, target: String, contentIntent: PendingIntent?) {
         try {
-            val body = JSONObject().apply {
-                put("title", title)
-                put("text", text)
-                if (phone != null) put("phone", phone)
-                if (isGroup != null) put("isGroup", isGroup)
-                attachMediaIfAny(this, text, postTimeMs, target, contentIntent)
-            }.toString()
+            // FIX (25.8.2026, OOM crash on large media): see the doc
+            // comment above PendingAttachment - this used to build the
+            // ENTIRE JSON (including every attachment's base64) as one
+            // in-memory String via JSONObject.toString() before writing
+            // anything, which crashed with OutOfMemoryError on a real
+            // device once an album could include large videos. Now
+            // attachMediaIfAny only locates files; the JSON (including
+            // every attachment's base64) is written directly to the HTTP
+            // connection's OutputStreamWriter below, streamed one small
+            // fixed-size chunk at a time via writeStreamedBase64.
+            val attachments = attachMediaIfAny(text, postTimeMs, target, contentIntent)
 
             val url = URL(webAppUrl)
             val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -398,10 +425,46 @@ class WaNotificationListener : NotificationListenerService() {
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 connectTimeout = 15000
-                readTimeout = 15000
+                // A bit more headroom than the old 15s - streaming
+                // several large attachments over a slow connection can
+                // legitimately take longer than a plain-text notification
+                // ever did.
+                readTimeout = 30000
             }
 
-            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(body) }
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
+                writer.write("{\"title\":")
+                writer.write(JSONObject.quote(title))
+                writer.write(",\"text\":")
+                writer.write(JSONObject.quote(text))
+                if (phone != null) {
+                    writer.write(",\"phone\":")
+                    writer.write(JSONObject.quote(phone))
+                }
+                if (isGroup != null) {
+                    writer.write(",\"isGroup\":")
+                    writer.write(isGroup.toString())
+                }
+                if (attachments.isNotEmpty()) {
+                    writer.write(",\"mediaItemCount\":")
+                    writer.write(attachments.size.toString())
+                    writer.write(",\"mediaItems\":[")
+                    attachments.forEachIndexed { idx, att ->
+                        if (idx > 0) writer.write(",")
+                        writer.write("{\"mediaMimeType\":")
+                        writer.write(JSONObject.quote(att.mimeType))
+                        writer.write(",\"mediaFileName\":")
+                        writer.write(JSONObject.quote(att.file.name))
+                        writer.write(",\"tooLargeToAttachDirectly\":")
+                        writer.write(att.tooLargeToAttachDirectly.toString())
+                        writer.write(",\"mediaBase64\":\"")
+                        writeStreamedBase64(att.file, writer)
+                        writer.write("\"}")
+                    }
+                    writer.write("]")
+                }
+                writer.write("}")
+            }
 
             val responseCode = conn.responseCode
             val responseBody = (if (responseCode in 200..299) conn.inputStream else conn.errorStream)
@@ -416,18 +479,36 @@ class WaNotificationListener : NotificationListenerService() {
     }
 
     /**
-     * Best-effort: if the notification text looks like media (see
-     * MediaClassifier), tries to locate the actual file on disk and add
-     * mediaBase64/mediaMimeType/mediaFileName fields to the outgoing JSON
-     * body. On ANY failure along the way (permission not granted, file
-     * not found, file too large) this simply leaves the JSON body
-     * untouched - the plain-text notification still gets sent exactly as
-     * it always has, media or no media. Never throws.
+     * FIX (25.8.2026, OOM crash on large media): a real on-device crash
+     * (java.lang.OutOfMemoryError inside JSONObject.toString(), via
+     * JSONStringer's internal StringBuilder) confirmed that building the
+     * ENTIRE outgoing JSON - including every attachment's full base64
+     * string - as one in-memory String before ever writing a byte to the
+     * network is not safe on a memory-constrained device, especially
+     * once an album can include several large (up to 30MB raw) videos
+     * simultaneously. Base64-encoding a file roughly adds another ~1.37x
+     * its size as a second in-memory copy, and JSONStringer's
+     * StringBuilder.append/expandCapacity can transiently need yet
+     * another same-sized copy while growing - for a multi-video album
+     * that stacks into a multi-hundred-MB peak on a device the crash log
+     * showed had only ~52MB free.
+     *
+     * attachMediaIfAny() therefore no longer touches the JSON body at
+     * all - it only LOCATES files and returns lightweight PendingAttachment
+     * references (a File handle + mimeType + a size-tier flag). The
+     * actual base64 encoding happens in postToAppsScript(), streamed
+     * directly to the HTTP connection's OutputStreamWriter one small
+     * fixed-size chunk at a time (writeStreamedBase64Chunked) - so peak
+     * extra memory for attaching media is bounded by the chunk size
+     * (tens of KB), completely independent of how large the file is or
+     * how many files are in the album.
      */
-    private fun attachMediaIfAny(body: JSONObject, text: String, postTimeMs: Long, target: String, contentIntent: PendingIntent?) {
+    private data class PendingAttachment(val file: File, val mimeType: String, val tooLargeToAttachDirectly: Boolean)
+
+    private fun attachMediaIfAny(text: String, postTimeMs: Long, target: String, contentIntent: PendingIntent?): List<PendingAttachment> {
         try {
             val mediaType = MediaClassifier.classify(text)
-            if (mediaType == MediaClassifier.MediaType.NONE) return
+            if (mediaType == MediaClassifier.MediaType.NONE) return emptyList()
 
             val now = System.currentTimeMillis()
             val mediaEventKey = "$target|${mediaType.name}"
@@ -440,7 +521,7 @@ class WaNotificationListener : NotificationListenerService() {
             // multi-notification scenario this guards against.
             if (shouldSkipMediaEvent(mediaEventKey, now)) {
                 EventLog.log("Listener: ⏭️ מדלג על צירוף מדיה - אותו אירוע מדיה (${mediaType.name}) עבור '$target' כבר טופל לפני פחות מ-${MEDIA_EVENT_DEDUPE_WINDOW_MS}ms")
-                return
+                return emptyList()
             }
 
             // FIX (23.8.2026, multi-media): parse how many items WhatsApp
@@ -497,7 +578,7 @@ class WaNotificationListener : NotificationListenerService() {
                 }
             }
 
-            if (found.isEmpty()) return
+            if (found.isEmpty()) return emptyList()
 
             // Filter out anything we've already attached+sent very
             // recently (belt-and-suspenders against the event-level
@@ -522,51 +603,36 @@ class WaNotificationListener : NotificationListenerService() {
                     else -> true
                 }
             }
-            if (usable.isEmpty()) return
+            if (usable.isEmpty()) return emptyList()
 
             if (expectedCount > usable.size) {
                 EventLog.log("Listener: ℹ️ זוהו $expectedCount פריטים בהודעה אך נמצאו/נשלחו רק ${usable.size} - יתר הפריטים באלבום לא הצליחו להתאתר (מגבלה ידועה, ראו תיעוד ב-WaMediaLocator)")
             }
 
-            // Backward compatible: keep the original single-file fields
-            // populated with the first item, so a Code.gs backend that
-            // hasn't been updated yet still gets exactly the behaviour it
-            // had before this fix (one image, no crash/regression).
-            // ADDITIONALLY (new): a "mediaItems" array with every item
-            // found, for a backend updated to loop over it and forward
-            // them all. Code.gs needs a matching update to actually make
-            // use of anything beyond the first item - see handoff notes.
-            val itemsJson = org.json.JSONArray()
-            usable.forEachIndexed { idx, fm ->
-                val bytes = fm.file.readBytes()
-                val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-                val tooLargeToAttachDirectly = fm.file.length() > MEDIA_SIZE_CAP_BYTES
-                val item = JSONObject().apply {
-                    put("mediaBase64", base64)
-                    put("mediaMimeType", fm.mimeType)
-                    put("mediaFileName", fm.file.name)
-                    put("tooLargeToAttachDirectly", tooLargeToAttachDirectly)
-                }
-                itemsJson.put(item)
+            // Backward compatible fields (flat mediaBase64/mediaMimeType/
+            // mediaFileName at the JSON root) are no longer emitted -
+            // Code.gs's normalizeMediaItems() always prefers a non-empty
+            // "mediaItems" array when present, which this app always
+            // sends whenever there's any media, so the flat fallback
+            // fields were dead weight that only cost an extra read+encode
+            // of the first file for no benefit. See the doc comment
+            // above PendingAttachment for why encoding itself is deferred
+            // out of this function entirely now.
+            val attachments = usable.map { fm ->
                 markSent(fm.file.absolutePath, now)
-
-                if (idx == 0) {
-                    body.put("mediaBase64", base64)
-                    body.put("mediaMimeType", fm.mimeType)
-                    body.put("mediaFileName", fm.file.name)
-                }
-                val sizeLabel = if (tooLargeToAttachDirectly) "${bytes.size / 1024}KB, יעלה כקישור Drive" else "${bytes.size / 1024}KB"
-                Log.i(TAG, "Attaching media (${idx + 1}/${usable.size}): ${fm.file.name} (${bytes.size} bytes, ${fm.mimeType}, tooLargeToAttachDirectly=$tooLargeToAttachDirectly)")
-                EventLog.log("Listener: 📎 מצרף קובץ מדיה (${idx + 1}/${usable.size}): ${fm.file.name} ($sizeLabel)")
+                val tooLargeToAttachDirectly = fm.file.length() > MEDIA_SIZE_CAP_BYTES
+                val sizeLabel = if (tooLargeToAttachDirectly) "${fm.file.length() / 1024}KB, יעלה כקישור Drive" else "${fm.file.length() / 1024}KB"
+                EventLog.log("Listener: 📎 מצרף קובץ מדיה: ${fm.file.name} ($sizeLabel)")
+                PendingAttachment(fm.file, fm.mimeType, tooLargeToAttachDirectly)
             }
-            body.put("mediaItems", itemsJson)
-            body.put("mediaItemCount", usable.size)
+            return attachments
         } catch (e: Exception) {
             // Deliberately swallow - see doc comment above. A media
             // lookup/read failure must never prevent the plain-text
             // notification from being sent.
             Log.e(TAG, "Failed to attach media (non-fatal, sending text only)", e)
             EventLog.log("Listener: ⚠️ צירוף מדיה נכשל (לא קריטי, נשלח כטקסט): ${e.javaClass.simpleName}: ${e.message}")
+            return emptyList()
         }
     }
 

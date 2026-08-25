@@ -59,6 +59,7 @@
         android:allowBackup="true"
         android:icon="@drawable/ic_launcher"
         android:label="WA Bridge"
+        android:largeHeap="true"
         android:theme="@style/Theme.WaBridge">
 
         <activity
