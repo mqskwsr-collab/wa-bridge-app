@@ -83,7 +83,18 @@ object PhoneLearnLearner {
         }
         prefs.edit().putLong(key(target), now).apply()
 
-        if (PhoneLearnCoordinator.hasPendingLearn() || LearnCoordinator.hasPendingLearn() || SendCoordinator.hasPendingJob()) {
+        // FIX (25.8.2026, concurrent-automation-flows bug): confirmed on
+        // a real device - this guard checked every OTHER coordinator but
+        // never MediaDownloadCoordinator, so a phone-learn attempt could
+        // (and did) start while a video album's forced-download was
+        // still mid-flight, firing its own contentIntent.send() and
+        // tapping the contact-info header partway through - which
+        // knocked the concurrent MediaDownload flow off the screen state
+        // it was tracking and broke "More options" detection for every
+        // remaining album item from that point on. Added the missing
+        // check.
+        if (PhoneLearnCoordinator.hasPendingLearn() || LearnCoordinator.hasPendingLearn() ||
+            SendCoordinator.hasPendingJob() || MediaDownloadCoordinator.hasPendingDownload()) {
             Log.d(TAG, "Skipping phone-learn for '$target' - another flow already in progress")
             return
         }

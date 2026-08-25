@@ -187,6 +187,20 @@ class PollingService : Service() {
             }
         }
 
+        // FIX (25.8.2026, concurrent-automation-flows bug): same class of
+        // gap found in PhoneLearnLearner/GroupLinkLearner - this trigger
+        // point had NO check at all against any other flow already
+        // running, unlike the other three which (now) all check each
+        // other. A queued reply could fire mid-way through an unrelated
+        // media-download/phone-learn/group-link flow and collide on
+        // screen exactly like the video-album case that surfaced this.
+        if (MediaDownloadCoordinator.hasPendingDownload() || PhoneLearnCoordinator.hasPendingLearn() ||
+            LearnCoordinator.hasPendingLearn() || SendCoordinator.hasPendingJob()) {
+            Log.d(TAG, "Deferring send for row $rowNumber - another flow already in progress")
+            EventLog.log("Poll: ⏭️ תהליך אחר כבר רץ - דוחה שליחה לשורה $rowNumber לסבב הבא")
+            return
+        }
+
         val job = SendCoordinator.PendingSend(rowNumber, type, target, text, phoneOrLink)
         val latch = CountDownLatch(1)
         var result: SendCoordinator.Result = SendCoordinator.Result.TIMEOUT

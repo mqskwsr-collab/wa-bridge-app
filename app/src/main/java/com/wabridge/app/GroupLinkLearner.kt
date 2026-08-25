@@ -105,7 +105,12 @@ object GroupLinkLearner {
         }
         prefs.edit().putLong(key(target), now).apply()
 
-        if (LearnCoordinator.hasPendingLearn() || PhoneLearnCoordinator.hasPendingLearn() || SendCoordinator.hasPendingJob()) {
+        // FIX (25.8.2026, concurrent-automation-flows bug): same gap as
+        // PhoneLearnLearner's identical guard - MediaDownloadCoordinator
+        // was never checked here either, so a group-link-learn attempt
+        // could equally have collided with a media album mid-download.
+        if (LearnCoordinator.hasPendingLearn() || PhoneLearnCoordinator.hasPendingLearn() ||
+            SendCoordinator.hasPendingJob() || MediaDownloadCoordinator.hasPendingDownload()) {
             Log.d(TAG, "Skipping learn for '$target' - another flow already in progress")
             EventLog.log("Learn: ⏭️ מדלג על למידת קישור עבור '$target' - תהליך אחר כבר רץ כרגע")
             return
