@@ -125,6 +125,10 @@ class WaSendAccessibilityService : AccessibilityService() {
         // Android appends to avoid a filename collision - see
         // stripDuplicateSuffix's doc comment.
         private val DUPLICATE_SUFFIX_REGEX = Regex("""^(.*?)\(\d+\)(\.[^.]+)?$""")
+        // FIX (25.8.2026, voice-note investigation): matches WhatsApp's
+        // "play voice message" button - see the long-press experiment
+        // this feeds, in stage 0's bubble==null branch.
+        private val VOICE_NOTE_PLAY_BUTTON_REGEX = Regex("""(השמעת ההודעה הקולית|play voice (message|note))""", RegexOption.IGNORE_CASE)
         // FIX (21.8.2026): the FULL on-device tree dump (see FIX46)
         // revealed the real culprit for why imgCount stayed flat at 2
         // the whole timeout - the photo bubble is classed as
@@ -196,6 +200,7 @@ class WaSendAccessibilityService : AccessibilityService() {
     // per item (init + each swipe) so every item gets exactly one try.
     private var hasTriedRevealTapForItem = false
     private var hasDumpedAfterRevealTapTree = false
+    private var hasTriedVoiceNoteLongPress = false
 
     private val handler = Handler(Looper.getMainLooper())
     private var searching = false
@@ -341,6 +346,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             saveMenuAttemptStep = 0
             hasTriedRevealTapForItem = false
             hasDumpedAfterRevealTapTree = false
+            hasTriedVoiceNoteLongPress = false
             lastMediaDownloadDumpTime = 0L
             dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
             swipesAttempted = 0
@@ -968,6 +974,49 @@ class WaSendAccessibilityService : AccessibilityService() {
                         mediaTapTime = System.currentTimeMillis()
                         handler.postDelayed(this, MEDIA_DOWNLOAD_POLL_INTERVAL_MS)
                     } else {
+                        // FIX (25.8.2026, voice-note investigation): a
+                        // real on-device dump for VOICE_NOTE confirmed a
+                        // genuine "‏השמעת ההודעה הקולית" (play voice
+                        // message) button exists - but tapping it would
+                        // only start/stop PLAYBACK, not open any save
+                        // path. Unlike photos/videos, a voice note has no
+                        // full-screen viewer to open at all - WhatsApp
+                        // messages are normally saved/shared via a LONG-
+                        // PRESS on the message bubble, which opens a
+                        // different per-message context menu (star/
+                        // forward/reply/delete...) than the "More
+                        // options" toolbar used for photos/videos. This
+                        // is a ONE-TIME diagnostic experiment, not a real
+                        // save flow yet: long-press the bottommost (most
+                        // recent) play button once, then dump the
+                        // resulting tree, so the next log shows what that
+                        // context menu actually contains - whether it has
+                        // a usable save/share/forward option at all -
+                        // instead of continuing to guess blind.
+                        if (job.mediaType == MediaClassifier.MediaType.VOICE_NOTE && !hasTriedVoiceNoteLongPress) {
+                            hasTriedVoiceNoteLongPress = true
+                            val playButton = findBottommostMatchingDescription(root, VOICE_NOTE_PLAY_BUTTON_REGEX)
+                            if (playButton != null) {
+                                val r = Rect()
+                                playButton.getBoundsInScreen(r)
+                                EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] נמצא כפתור השמעת הקלטה ב-$r - מנסה לחיצה ארוכה כדי לחשוף תפריט הודעה")
+                                val longPressPath = Path().apply { moveTo(r.centerX().toFloat(), r.centerY().toFloat()) }
+                                val longPressGesture = GestureDescription.Builder()
+                                    .addStroke(GestureDescription.StrokeDescription(longPressPath, 0, 700))
+                                    .build()
+                                dispatchGesture(longPressGesture, object : GestureResultCallback() {
+                                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                                        EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] אבחון מסך אחרי הלחיצה הארוכה:")
+                                        dumpFullNodeTree(root)
+                                    }
+                                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                                        EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] הלחיצה הארוכה בוטלה ע\"י המערכת")
+                                    }
+                                }, null)
+                            } else {
+                                EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] לא נמצא כפתור השמעת הקלטה למחוות לחיצה ארוכה")
+                            }
+                        }
                         handler.postDelayed(this, SEARCH_INTERVAL_MS)
                     }
                 }
@@ -1529,6 +1578,43 @@ class WaSendAccessibilityService : AccessibilityService() {
                         bestBottom = rect.bottom
                         best = clickable
                     }
+                }
+            }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                visit(child)
+            }
+        }
+
+        visit(root)
+        return best
+    }
+
+    /**
+     * FIX (25.8.2026, voice-note investigation): finds the bottommost
+     * (most recent) node whose own or nearest-clickable-ancestor's
+     * content-description matches [regex] - not restricted to any
+     * particular className, unlike findBottommostImageViewClassed, since
+     * we don't yet know what class WhatsApp's voice-note play button
+     * reports itself as beyond what a single real dump already showed
+     * (ImageButton, per the log this was built from - but kept
+     * class-agnostic here in case that varies).
+     */
+    private fun findBottommostMatchingDescription(root: AccessibilityNodeInfo, regex: Regex): AccessibilityNodeInfo? {
+        var best: AccessibilityNodeInfo? = null
+        var bestBottom = -1
+        val rect = Rect()
+
+        fun visit(node: AccessibilityNodeInfo) {
+            val desc = node.contentDescription?.toString() ?: ""
+            if (regex.containsMatchIn(desc)) {
+                var clickable: AccessibilityNodeInfo? = node
+                while (clickable != null && !clickable.isClickable) clickable = clickable.parent
+                val target = clickable ?: node
+                target.getBoundsInScreen(rect)
+                if (rect.bottom > bestBottom) {
+                    bestBottom = rect.bottom
+                    best = target
                 }
             }
             for (i in 0 until node.childCount) {
