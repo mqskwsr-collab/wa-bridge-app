@@ -121,6 +121,10 @@ class WaSendAccessibilityService : AccessibilityService() {
         // the "show all" form - actually more so, since it's on the
         // EXACT bubble being tapped rather than a sibling summary bubble.
         private val ALBUM_SIZE_ITEM_OF_TOTAL_REGEX = Regex("""(?:מתוך|of)\s*(\d+)""", RegexOption.IGNORE_CASE)
+        // FIX (25.8.2026, duplicate-resave bug): matches the "(N)" suffix
+        // Android appends to avoid a filename collision - see
+        // stripDuplicateSuffix's doc comment.
+        private val DUPLICATE_SUFFIX_REGEX = Regex("""^(.*?)\(\d+\)(\.[^.]+)?$""")
         // FIX (21.8.2026): the FULL on-device tree dump (see FIX46)
         // revealed the real culprit for why imgCount stayed flat at 2
         // the whole timeout - the photo bubble is classed as
@@ -1220,7 +1224,36 @@ class WaSendAccessibilityService : AccessibilityService() {
                             // comparing found.size only AT SWIPE BOUNDARIES
                             // (foundCountBeforeSwipe, updated exactly once
                             // per swipe) instead of every poll tick.
-                            val swipeHelped = found.size > foundCountBeforeSwipe
+                            //
+                            // FIX (25.8.2026, duplicate-resave bug): a real
+                            // 6-photo album showed the OPPOSITE failure -
+                            // found.size DID grow after a swipe (1→2), but
+                            // the new file was "IMG-...WA0009(1).jpg" next
+                            // to an already-collected "IMG-...WA0009.jpg" -
+                            // WhatsApp's own "(N)" collision suffix,
+                            // strongly suggesting the swipe never actually
+                            // moved to new content and just re-saved the
+                            // same image under a new name. Since count-only
+                            // swipeHelped treated that as real progress, no
+                            // correction was ever attempted, and by the end
+                            // one real photo was duplicated while another
+                            // was never captured. Now a growth in count is
+                            // only trusted as real progress if the newest
+                            // file's base name (stripped of WhatsApp's
+                            // "(N)" suffix) doesn't collide with a base name
+                            // already in the result set - a same-base-name
+                            // "new" file no longer resets the no-growth
+                            // counter, so the self-correction logic gets a
+                            // real chance to kick in even when the raw
+                            // count is misleading.
+                            val newestBaseName = found.firstOrNull()?.file?.name?.let { stripDuplicateSuffix(it) }
+                            val priorBaseNames = found.drop(1).map { stripDuplicateSuffix(it.file.name) }.toSet()
+                            val looksLikeSameContentResave = found.size > foundCountBeforeSwipe &&
+                                newestBaseName != null && newestBaseName in priorBaseNames
+                            if (looksLikeSameContentResave) {
+                                EventLog.log("A11y-MediaDownload: 🔁 הקובץ החדש (${found.firstOrNull()?.file?.name}) נראה כשמירה חוזרת של תוכן שכבר נמצא - לא נחשב כהתקדמות אמיתית")
+                            }
+                            val swipeHelped = found.size > foundCountBeforeSwipe && !looksLikeSameContentResave
                             if (swipesAttempted > 0) {
                                 consecutiveSwipesWithNoGrowth = if (swipeHelped) 0 else consecutiveSwipesWithNoGrowth + 1
                             }
@@ -1363,6 +1396,21 @@ class WaSendAccessibilityService : AccessibilityService() {
      * swipe was very likely never actually landing on the real image
      * content at all.
      */
+    /**
+     * Strips Android/WhatsApp's auto-appended "(N)" collision suffix from
+     * a filename, e.g. "IMG-20260823-WA0009(1).jpg" -> "IMG-20260823-WA0009.jpg".
+     * That suffix is added when something tries to save a file under a
+     * name that already exists on disk - two files sharing a base name
+     * this way is a strong signal they're the same re-saved content, not
+     * two genuinely different photos that coincidentally got the same
+     * WhatsApp-assigned name. See the FIX (25.8.2026, duplicate-resave
+     * bug) doc comment at its call site for the real-device case this
+     * was built to catch.
+     */
+    private fun stripDuplicateSuffix(fileName: String): String {
+        return DUPLICATE_SUFFIX_REGEX.replace(fileName, "$1$2")
+    }
+
     private fun findImageViewerBounds(root: AccessibilityNodeInfo): Rect? {
         var best: Rect? = null
         var bestArea = 0L
