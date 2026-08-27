@@ -440,7 +440,12 @@ class WaNotificationListener : NotificationListenerService() {
             // every attachment's base64) is written directly to the HTTP
             // connection's OutputStreamWriter below, streamed one small
             // fixed-size chunk at a time via writeStreamedBase64.
-            val attachments = attachMediaIfAny(text, postTimeMs, target, contentIntent)
+            val attachResult = attachMediaIfAny(text, postTimeMs, target, contentIntent)
+            if (attachResult.skipEntireSend) {
+                EventLog.log("Listener: 🚫 השליחה כולה בוטלת - ראה שורת הלוג הקודמת")
+                return
+            }
+            val attachments = attachResult.attachments
 
             val url = URL(webAppUrl)
             val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -528,10 +533,38 @@ class WaNotificationListener : NotificationListenerService() {
      */
     private data class PendingAttachment(val file: File, val mimeType: String, val tooLargeToAttachDirectly: Boolean)
 
-    private fun attachMediaIfAny(text: String, postTimeMs: Long, target: String, contentIntent: PendingIntent?): List<PendingAttachment> {
+    /**
+     * FIX (27.8.2026, empty duplicate-album email bug): confirmed on-
+     * device - WhatsApp fires MULTIPLE separate notifications for the
+     * same album as it progressively indexes it ("‏תמונה אחת (1)" then
+     * moments later "‏2 תמונות" etc, sometimes even after the true count
+     * is much higher). Each one is handled as its own independent job
+     * here, and the first one to run typically ends up doing the full
+     * force-download/swipe flow and actually sending every real photo.
+     * By the time a LATER notification for the very same album gets its
+     * turn (the A11y flow is serialized, so a slow first job can delay
+     * a second job's own attachMediaIfAny call by 40+ seconds - far
+     * longer than MEDIA_EVENT_DEDUPE_WINDOW_MS's 6s window, so that
+     * guard alone doesn't catch this), MediaStore correctly finds the
+     * same real files again, but wasRecentlySent() filters every single
+     * one of them out - leaving a completely empty attachment list. The
+     * OLD behaviour still POSTed a "successful" text-only email in that
+     * case (mediaCount:0, body text still saying e.g. "2 תמונות"),
+     * which is pure noise: nothing new to report, the real album was
+     * already fully delivered by the earlier job. This return type lets
+     * attachMediaIfAny distinguish that specific "found real files, but
+     * every one was already sent moments ago" case from a genuine "no
+     * media could be located at all" failure (mediaType matched but
+     * found was empty from the start) - the latter is still worth an
+     * email, since it's real information that something arrived and
+     * couldn't be fetched. Only the former is suppressed entirely.
+     */
+    private data class AttachResult(val attachments: List<PendingAttachment>, val skipEntireSend: Boolean = false)
+
+    private fun attachMediaIfAny(text: String, postTimeMs: Long, target: String, contentIntent: PendingIntent?): AttachResult {
         try {
             val mediaType = MediaClassifier.classify(text)
-            if (mediaType == MediaClassifier.MediaType.NONE) return emptyList()
+            if (mediaType == MediaClassifier.MediaType.NONE) return AttachResult(emptyList())
 
             val now = System.currentTimeMillis()
             val mediaEventKey = "$target|${mediaType.name}"
@@ -544,7 +577,7 @@ class WaNotificationListener : NotificationListenerService() {
             // multi-notification scenario this guards against.
             if (shouldSkipMediaEvent(mediaEventKey, now)) {
                 EventLog.log("Listener: ⏭️ מדלג על צירוף מדיה - אותו אירוע מדיה (${mediaType.name}) עבור '$target' כבר טופל לפני פחות מ-${MEDIA_EVENT_DEDUPE_WINDOW_MS}ms")
-                return emptyList()
+                return AttachResult(emptyList())
             }
 
             // FIX (23.8.2026, multi-media): parse how many items WhatsApp
@@ -616,7 +649,7 @@ class WaNotificationListener : NotificationListenerService() {
                 }
             }
 
-            if (found.isEmpty()) return emptyList()
+            if (found.isEmpty()) return AttachResult(emptyList())
 
             // Filter out anything we've already attached+sent very
             // recently (belt-and-suspenders against the event-level
@@ -641,7 +674,25 @@ class WaNotificationListener : NotificationListenerService() {
                     else -> true
                 }
             }
-            if (usable.isEmpty()) return emptyList()
+            if (usable.isEmpty()) {
+                // FIX (27.8.2026, empty duplicate-album email bug): see
+                // the AttachResult doc comment above. `found` was NOT
+                // empty here - real files for this album genuinely exist
+                // on disk - but every single one of them was filtered out
+                // by wasRecentlySent (or, far more rarely, the hard size
+                // cap). That means an earlier job for the same album
+                // already delivered everything there is to deliver; this
+                // notification is a stale re-announcement of it, not new
+                // information, so the whole email is suppressed rather
+                // than going out empty with a misleading "2 תמונות"-style
+                // body and mediaCount:0.
+                val allFilteredWereAlreadySent = found.all { wasRecentlySent(it.file.absolutePath, now) }
+                if (allFilteredWereAlreadySent) {
+                    EventLog.log("Listener: ⏭️ מדלג על שליחה כולה - כל ${found.size} הקבצים שנמצאו כבר נשלחו לאחרונה (התראה חוזרת/מתעדכנת עבור אותו אלבום)")
+                    return AttachResult(emptyList(), skipEntireSend = true)
+                }
+                return AttachResult(emptyList())
+            }
 
             if (expectedCount > usable.size) {
                 EventLog.log("Listener: ℹ️ זוהו $expectedCount פריטים בהודעה אך נמצאו/נשלחו רק ${usable.size} - יתר הפריטים באלבום לא הצליחו להתאתר (מגבלה ידועה, ראו תיעוד ב-WaMediaLocator)")
@@ -663,14 +714,14 @@ class WaNotificationListener : NotificationListenerService() {
                 EventLog.log("Listener: 📎 מצרף קובץ מדיה: ${fm.file.name} ($sizeLabel)")
                 PendingAttachment(fm.file, fm.mimeType, tooLargeToAttachDirectly)
             }
-            return attachments
+            return AttachResult(attachments)
         } catch (e: Exception) {
             // Deliberately swallow - see doc comment above. A media
             // lookup/read failure must never prevent the plain-text
             // notification from being sent.
             Log.e(TAG, "Failed to attach media (non-fatal, sending text only)", e)
             EventLog.log("Listener: ⚠️ צירוף מדיה נכשל (לא קריטי, נשלח כטקסט): ${e.javaClass.simpleName}: ${e.message}")
-            return emptyList()
+            return AttachResult(emptyList())
         }
     }
 

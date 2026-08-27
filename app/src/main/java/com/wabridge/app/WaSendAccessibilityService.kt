@@ -87,6 +87,25 @@ class WaSendAccessibilityService : AccessibilityService() {
         // ~1s stage-1 poll cycles to let the CURRENT item sit before
         // considering a swipe to the next one - see pollCyclesOnCurrentItem.
         private const val MIN_POLL_CYCLES_BEFORE_SWIPE = 4
+        // FIX (27.8.2026, stuck-swipe-eats-the-only-slack bug): confirmed
+        // on-device - a real 6-photo album needs exactly 5 swipes to
+        // visit every item, and maxSwipes below was computed as exactly
+        // (album size - 1) with zero slack. When a single swipe got
+        // physically stuck (viewer didn't advance, WhatsApp re-saved the
+        // same image under a "(N)" suffix - correctly detected and
+        // discarded by WaMediaLocator's base-name dedupe, see its FIX
+        // (27.8.2026) doc comment), that swipe still counted against the
+        // budget without having found anything new, so the run ran out
+        // of allowed swipes one short and the true 6th, never-seen photo
+        // was permanently missed even though the whole flow otherwise
+        // completed cleanly (no timeout, no error - it just legitimately
+        // exhausted swipesAttempted at 5/6 found). Adding a small buffer
+        // of extra swipes gives the run room to recover from one or two
+        // stuck swipes without changing behaviour for albums that never
+        // get stuck at all (they simply reach found.size >=
+        // expectedAlbumSize and stop early, never using the buffer).
+        private const val STUCK_SWIPE_BUFFER = 2
+
         // How often to re-check the media folder while the full-image
         // viewer is open, waiting for WhatsApp to finish writing the
         // real file to disk (see stage 1 doc comment - replaces the old
@@ -963,7 +982,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                         detectedAlbumN?.let { n ->
                             EventLog.log("A11y-MediaDownload: 🔢 גודל אלבום אמיתי זוהה מתוך תיאור הבועה: $n")
                             MediaDownloadCoordinator.reportDetectedAlbumSize(n)
-                            maxSwipes = (n - 1).coerceAtLeast(0)
+                            maxSwipes = (n - 1 + STUCK_SWIPE_BUFFER).coerceAtLeast(0)
                             dynamicMediaDownloadTimeoutMs = (MEDIA_DOWNLOAD_TIMEOUT_MS + maxSwipes * MEDIA_DOWNLOAD_TIMEOUT_PER_EXTRA_ITEM_MS)
                                 .coerceAtMost(MEDIA_DOWNLOAD_TIMEOUT_MS_MAX)
                             EventLog.log("A11y-MediaDownload: ⏱️ תקציב הזמן הורחב ל-${dynamicMediaDownloadTimeoutMs / 1000}s עבור אלבום בגודל $n (עד $maxSwipes החלקות)")
