@@ -220,6 +220,13 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var hasTriedRevealTapForItem = false
     private var hasDumpedAfterRevealTapTree = false
     private var hasTriedVoiceNoteLongPress = false
+    // FIX (27.8.2026, voice-note investigation part 2): the 25.8 dump
+    // confirmed the long-press opens a per-message SELECTION toolbar
+    // (reply/star/delete/forward/pin + a "More options" ⋮), not a
+    // save-capable menu by itself. One more one-time diagnostic: once
+    // that toolbar is up, try tapping ITS "More options" too and dump
+    // what appears, before writing any real save logic blind.
+    private var hasTriedVoiceNoteMenuTap = false
 
     private val handler = Handler(Looper.getMainLooper())
     private var searching = false
@@ -366,6 +373,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             hasTriedRevealTapForItem = false
             hasDumpedAfterRevealTapTree = false
             hasTriedVoiceNoteLongPress = false
+            hasTriedVoiceNoteMenuTap = false
             lastMediaDownloadDumpTime = 0L
             dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
             swipesAttempted = 0
@@ -1034,6 +1042,28 @@ class WaSendAccessibilityService : AccessibilityService() {
                                 }, null)
                             } else {
                                 EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] לא נמצא כפתור השמעת הקלטה למחוות לחיצה ארוכה")
+                            }
+                        } else if (job.mediaType == MediaClassifier.MediaType.VOICE_NOTE &&
+                            hasTriedVoiceNoteLongPress && !hasTriedVoiceNoteMenuTap
+                        ) {
+                            // FIX (27.8.2026, voice-note investigation part 2):
+                            // runs on the NEXT poll cycle after the long-press
+                            // dump above, once the selection toolbar
+                            // (תשובה/סימון בכוכב/מחיקה/העברה/הצמדה/More
+                            // options) is confirmed up. Tries its "More
+                            // options" (⋮) once and dumps what opens - still
+                            // diagnostic-only, no save attempt yet.
+                            hasTriedVoiceNoteMenuTap = true
+                            val menuMoreOptions = findClickableMatchingRegex(root, MORE_OPTIONS_DESC_REGEX)
+                            if (menuMoreOptions != null) {
+                                EventLog.log("A11y-MediaDownload: ⋮ [ניסוי] נמצא \"More options\" בתפריט הבחירה של ההודעה הקולית - לוחץ")
+                                menuMoreOptions.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                handler.postDelayed({
+                                    EventLog.log("A11y-MediaDownload: 🌳 [ניסוי] אבחון תפריט לאחר לחיצה על More options בהודעה קולית:")
+                                    rootInActiveWindow?.let { dumpFullNodeTree(it) }
+                                }, 700L)
+                            } else {
+                                EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי] לא נמצא \"More options\" בתפריט הבחירה של ההודעה הקולית")
                             }
                         }
                         handler.postDelayed(this, SEARCH_INTERVAL_MS)
