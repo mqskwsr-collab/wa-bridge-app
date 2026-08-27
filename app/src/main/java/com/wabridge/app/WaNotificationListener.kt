@@ -39,6 +39,17 @@ class WaNotificationListener : NotificationListenerService() {
         // "is the listener actually connected right now" on every poll
         // cycle - not just retroactively inferred from missing messages.
         @Volatile var isConnected = false
+        // FIX (26.8.2026, stale-replayed-notifications bug): Android's
+        // NotificationListenerService replays every currently-ACTIVE
+        // notification to a listener the moment it connects/reconnects -
+        // not just genuinely new ones. Confirmed on-device: right after a
+        // fresh connect, a burst of notifications about messages sent
+        // MINUTES earlier (still sitting in the shade) got processed and
+        // emailed as if they were new. sbn.postTime is the ORIGINAL post
+        // time (unaffected by the replay), so anything posted before the
+        // listener connected is unambiguously a replay, never a genuinely
+        // new message - filtered in handleNotification() below.
+        @Volatile var listenerConnectedAtMs = 0L
 
         // In-memory de-duplication: Android can re-post/update the same
         // logical notification multiple times in quick succession (e.g.
@@ -175,6 +186,17 @@ class WaNotificationListener : NotificationListenerService() {
 
     private fun handleNotification(sbn: StatusBarNotification) {
         if (sbn.packageName != WHATSAPP_PACKAGE) return
+
+        // FIX (26.8.2026, stale-replayed-notifications bug): see the
+        // listenerConnectedAtMs doc comment above - reject anything
+        // posted before this connection began, since it's guaranteed to
+        // be a system replay of a pre-existing notification, not a new
+        // message.
+        if (sbn.postTime < listenerConnectedAtMs) {
+            Log.d(TAG, "Ignoring stale replayed notification from before listener connected (postTime=${sbn.postTime}, connectedAt=$listenerConnectedAtMs)")
+            EventLog.log("Listener: ⏭️ מתעלם - התראה ישנה שנדחפה מחדש ע\"י המערכת (מלפני חיבור השירות)")
+            return
+        }
 
         val extras = sbn.notification.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim() ?: ""
@@ -537,7 +559,22 @@ class WaNotificationListener : NotificationListenerService() {
 
             var found = WaMediaLocator.findRecentMediaFiles(this, mediaType, postTimeMs, maxCount = count)
 
-            if (found.isEmpty()) {
+            // FIX (26.8.2026, fast-path-truncates-album bug): confirmed
+            // on a real device - a 6-photo album's FIRST processed
+            // notification said only "2 תמונות" (WhatsApp's own count
+            // text updates progressively as it indexes more of the
+            // album), the quick MediaStore scan above found exactly 1
+            // file already cached from an earlier residual test, and
+            // since `found` wasn't EMPTY, force-download (the ONLY path
+            // that ever taps the bubble and discovers the REAL album
+            // size via ALBUM_SIZE_IN_DESC_REGEX/ALBUM_SIZE_ITEM_OF_TOTAL_REGEX)
+            // never ran at all - the message was sent as "done" with 1
+            // of 6 real photos, no error anywhere. Broadened the trigger
+            // from "found nothing" to "found fewer than the notification
+            // itself claims" so a partially-cached album still gets a
+            // real force-download attempt, which is what actually
+            // re-detects and widens to the true count.
+            if (found.size < count) {
                 // FIX (20.8.2026): the file wasn't on disk at all (not a
                 // timing/path issue - confirmed via diagnostics that the
                 // correct folder exists but is completely empty), most
@@ -640,6 +677,7 @@ class WaNotificationListener : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         isConnected = true
+        listenerConnectedAtMs = System.currentTimeMillis()
         Log.i(TAG, "Notification listener connected")
         EventLog.log("Listener: 🔌 שירות ההאזנה להתראות התחבר")
     }

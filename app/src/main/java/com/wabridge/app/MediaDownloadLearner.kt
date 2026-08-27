@@ -53,7 +53,7 @@ object MediaDownloadLearner {
             return false
         }
 
-        EventLog.log("MediaDownload: 📥 קובץ המדיה לא נמצא בדיסק - מנסה להכריח הורדה עבור '$target'")
+        EventLog.log("MediaDownload: 📥 המדיה לא נמצאה במלואה בדיסק - מנסה להכריח הורדה עבור '$target'")
 
         val latch = CountDownLatch(1)
         var result = MediaDownloadCoordinator.Result.TIMEOUT
