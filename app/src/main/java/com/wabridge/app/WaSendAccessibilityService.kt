@@ -227,6 +227,22 @@ class WaSendAccessibilityService : AccessibilityService() {
     // that toolbar is up, try tapping ITS "More options" too and dump
     // what appears, before writing any real save logic blind.
     private var hasTriedVoiceNoteMenuTap = false
+    // FIX (27.8.2026, race-condition bug): the 27.8 21:37 on-device log
+    // showed the "More options" tap firing BEFORE the long-press
+    // gesture's own onCompleted callback log line - SEARCH_INTERVAL_MS
+    // (400ms) is shorter than the long-press gesture duration (700ms),
+    // so hasTriedVoiceNoteLongPress (set synchronously at dispatch time)
+    // was already true on the very next poll tick, while the selection
+    // toolbar hadn't opened yet. The regex then matched the chat's
+    // ALWAYS-PRESENT header "More options" icon instead (same corner
+    // position as the selection toolbar's), opening the wrong menu
+    // entirely (confirmed by the dump: "קבוצה חדשה/הצגת איש הקשר/חיפוש/
+    // מדיה קישורים ומסמכים/..." - the normal chat-info dropdown, not a
+    // per-message menu). This flag is set ONLY inside the gesture's
+    // actual onCompleted callback, so the menu-tap step can't run until
+    // the long-press has truly finished and the real selection toolbar
+    // is on screen.
+    private var voiceNoteLongPressCompleted = false
 
     private val handler = Handler(Looper.getMainLooper())
     private var searching = false
@@ -374,6 +390,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             hasDumpedAfterRevealTapTree = false
             hasTriedVoiceNoteLongPress = false
             hasTriedVoiceNoteMenuTap = false
+            voiceNoteLongPressCompleted = false
             lastMediaDownloadDumpTime = 0L
             dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
             swipesAttempted = 0
@@ -1035,6 +1052,12 @@ class WaSendAccessibilityService : AccessibilityService() {
                                     override fun onCompleted(gestureDescription: GestureDescription?) {
                                         EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] אבחון מסך אחרי הלחיצה הארוכה:")
                                         dumpFullNodeTree(root)
+                                        // FIX (27.8.2026, race-condition bug): only now,
+                                        // once the gesture has genuinely finished and
+                                        // this dump reflects the real post-long-press
+                                        // screen, is it safe to let the next poll cycle
+                                        // look for the selection toolbar's "More options".
+                                        voiceNoteLongPressCompleted = true
                                     }
                                     override fun onCancelled(gestureDescription: GestureDescription?) {
                                         EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] הלחיצה הארוכה בוטלה ע\"י המערכת")
@@ -1044,7 +1067,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                                 EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] לא נמצא כפתור השמעת הקלטה למחוות לחיצה ארוכה")
                             }
                         } else if (job.mediaType == MediaClassifier.MediaType.VOICE_NOTE &&
-                            hasTriedVoiceNoteLongPress && !hasTriedVoiceNoteMenuTap
+                            voiceNoteLongPressCompleted && !hasTriedVoiceNoteMenuTap
                         ) {
                             // FIX (27.8.2026, voice-note investigation part 2):
                             // runs on the NEXT poll cycle after the long-press
