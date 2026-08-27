@@ -381,6 +381,27 @@ object WaMediaLocator {
         // twice. Tracked here with a local set, independent of and in
         // addition to excludePaths.
         val seenPaths = mutableSetOf<String>()
+        // FIX (27.8.2026, same-content-different-name duplicate bug):
+        // confirmed on a real 6-photo album - a stuck swipe re-tapped
+        // "Save" on an image the viewer never actually advanced past,
+        // and WhatsApp wrote that re-save to disk under its own auto
+        // "(N)" collision suffix (e.g. "IMG-...WA0001.jpg" already
+        // existed, so the re-save landed as "IMG-...WA0001(2).jpg").
+        // That's a genuinely NEW row/path in MediaStore, so seenPaths
+        // above never caught it - the query happily counted it as a
+        // distinct 6th photo, silently padding the result out to the
+        // expected album size while actually attaching one image twice
+        // and never reaching the real, different 6th photo at all. The
+        // accessibility service already had a same-base-name heuristic
+        // (stripDuplicateSuffix) to stop TRUSTING such a file as swipe
+        // progress, but that heuristic never touched the file list that
+        // actually gets attached and sent - this is the one place that
+        // list is assembled for every caller, so the dedupe belongs
+        // here: skip any row whose base name (with WhatsApp's "(N)"
+        // suffix stripped) was already accepted, and keep scanning the
+        // cursor for a genuinely different photo instead of stopping at
+        // maxCount rows.
+        val seenBaseNames = mutableSetOf<String>()
         try {
             val cursor: Cursor? = context.contentResolver.query(
                 collection, projection, selection, selectionArgs, sortOrder
@@ -395,6 +416,11 @@ object WaMediaLocator {
                     if (!seenPaths.add(path)) continue
                     val file = File(path)
                     if (!file.isFile) continue
+                    val baseName = stripDuplicateSuffix(file.name)
+                    if (!seenBaseNames.add(baseName)) {
+                        EventLog.log("Media: 🔁 מדלג - '${file.name}' נראה כשמירה חוזרת של תוכן שכבר נמצא (אותו שם בסיס: '$baseName')")
+                        continue
+                    }
                     results.add(FoundMedia(file, guessMimeType(file.name)))
                     EventLog.log("Media: ✅ נמצא קובץ נוסף דרך MediaStore (${results.size}/$maxCount): ${name ?: file.name}")
                 }
@@ -407,6 +433,22 @@ object WaMediaLocator {
             EventLog.log("Media: 🔎 שאילתת MediaStore (ריבוי) נכשלה: ${e.javaClass.simpleName}: ${e.message}")
         }
         return results
+    }
+
+    // FIX (27.8.2026): moved here (was private to WaSendAccessibilityService)
+    // since the dedupe it powers now lives in the MediaStore query itself -
+    // see the FIX (27.8.2026, same-content-different-name duplicate bug)
+    // doc comment above in findMultipleViaMediaStore. Strips Android/
+    // WhatsApp's auto-appended "(N)" collision suffix from a filename,
+    // e.g. "IMG-20260823-WA0009(1).jpg" -> "IMG-20260823-WA0009.jpg" -
+    // that suffix is added when something tries to save a file under a
+    // name that already exists on disk, which is a strong signal it's
+    // the same re-saved content, not a genuinely different photo that
+    // coincidentally got the same WhatsApp-assigned base name.
+    private val DUPLICATE_SUFFIX_REGEX = Regex("""^(.*?)\(\d+\)(\.[^.]+)?$""")
+
+    private fun stripDuplicateSuffix(fileName: String): String {
+        return DUPLICATE_SUFFIX_REGEX.replace(fileName, "$1$2")
     }
 
     private fun guessMimeType(fileName: String): String {
