@@ -191,6 +191,17 @@ class WaSendAccessibilityService : AccessibilityService() {
         // timed out even with the correct screen open.
         private val MORE_OPTIONS_DESC_REGEX = Regex("""(more options|options menu|אפשרויות נוספות|עוד אפשרויות)""", RegexOption.IGNORE_CASE)
         private val SAVE_TO_GALLERY_REGEX = Regex("""(save to gallery|save|download|שמירה בגלריה|שמור בגלריה|שמירה|הורדה)""", RegexOption.IGNORE_CASE)
+        // FIX (28.8.2026, voice-note multi-method experiment): the
+        // selection-toolbar "More options" path is a confirmed dead end
+        // for voice notes (always the generic chat overflow, no save
+        // item - verified on two separate real-device tests). This
+        // targets the "העברה"/"Forward" button in that SAME toolbar as a
+        // separate experiment - purely diagnostic: taps it and dumps
+        // whatever screen opens (almost certainly a contact/chat picker)
+        // WITHOUT selecting anything or completing an actual forward, to
+        // avoid ever sending a real message to a real contact by
+        // mistake.
+        private val FORWARD_DESC_REGEX = Regex("""(‏העברה|העברה|forward)""", RegexOption.IGNORE_CASE)
         // FIX (23.8.2026, full-album swipe): label of the container node
         // that holds the currently-displayed full-screen image (seen in
         // the on-device dump as a ViewGroup with label='הגדלת התמונה'
@@ -227,6 +238,18 @@ class WaSendAccessibilityService : AccessibilityService() {
     // that toolbar is up, try tapping ITS "More options" too and dump
     // what appears, before writing any real save logic blind.
     private var hasTriedVoiceNoteMenuTap = false
+    // FIX (28.8.2026, multi-method experiment): same race-condition
+    // lesson as voiceNoteLongPressCompleted - hasTriedVoiceNoteMenuTap is
+    // set synchronously at dispatch time, but the actual tap+dump+BACK
+    // only finishes 700ms later inside a postDelayed callback. Method B
+    // (Forward tap) must wait for THIS flag, not hasTriedVoiceNoteMenuTap,
+    // or it could fire while Method A's menu is still open on screen.
+    private var voiceNoteMenuTapCompleted = false
+    // FIX (28.8.2026, multi-method experiment): parallel diagnostic to
+    // hasTriedVoiceNoteMenuTap, tried on the same completed selection
+    // toolbar - taps "העברה"/Forward instead of "More options" and dumps
+    // what opens (diagnostic-only, doesn't complete an actual forward).
+    private var hasTriedVoiceNoteForwardTap = false
     // FIX (27.8.2026, race-condition bug): the 27.8 21:37 on-device log
     // showed the "More options" tap firing BEFORE the long-press
     // gesture's own onCompleted callback log line - SEARCH_INTERVAL_MS
@@ -390,6 +413,8 @@ class WaSendAccessibilityService : AccessibilityService() {
             hasDumpedAfterRevealTapTree = false
             hasTriedVoiceNoteLongPress = false
             hasTriedVoiceNoteMenuTap = false
+            voiceNoteMenuTapCompleted = false
+            hasTriedVoiceNoteForwardTap = false
             voiceNoteLongPressCompleted = false
             lastMediaDownloadDumpTime = 0L
             dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
@@ -1079,14 +1104,49 @@ class WaSendAccessibilityService : AccessibilityService() {
                             hasTriedVoiceNoteMenuTap = true
                             val menuMoreOptions = findClickableMatchingRegex(root, MORE_OPTIONS_DESC_REGEX)
                             if (menuMoreOptions != null) {
-                                EventLog.log("A11y-MediaDownload: ⋮ [ניסוי] נמצא \"More options\" בתפריט הבחירה של ההודעה הקולית - לוחץ")
+                                EventLog.log("A11y-MediaDownload: ⋮ [ניסוי-A] נמצא \"More options\" בתפריט הבחירה של ההודעה הקולית - לוחץ")
                                 menuMoreOptions.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                                 handler.postDelayed({
-                                    EventLog.log("A11y-MediaDownload: 🌳 [ניסוי] אבחון תפריט לאחר לחיצה על More options בהודעה קולית:")
+                                    EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-A] אבחון תפריט לאחר לחיצה על More options בהודעה קולית:")
                                     rootInActiveWindow?.let { dumpFullNodeTree(it) }
+                                    // FIX (28.8.2026, multi-method): this
+                                    // menu is a confirmed dead end (the
+                                    // generic chat overflow, no save item) -
+                                    // close it with BACK so it doesn't block
+                                    // the next method's screen state.
+                                    performGlobalAction(GLOBAL_ACTION_BACK)
+                                    voiceNoteMenuTapCompleted = true
                                 }, 700L)
                             } else {
-                                EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי] לא נמצא \"More options\" בתפריט הבחירה של ההודעה הקולית")
+                                EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-A] לא נמצא \"More options\" בתפריט הבחירה של ההודעה הקולית")
+                                voiceNoteMenuTapCompleted = true
+                            }
+                        } else if (job.mediaType == MediaClassifier.MediaType.VOICE_NOTE &&
+                            voiceNoteMenuTapCompleted && !hasTriedVoiceNoteForwardTap
+                        ) {
+                            // FIX (28.8.2026, multi-method experiment):
+                            // METHOD B - runs a couple poll cycles after
+                            // method A (More options, confirmed dead end)
+                            // closed itself. Tries "העברה"/Forward instead,
+                            // in the SAME selection toolbar. Purely
+                            // diagnostic: dumps whatever picker screen
+                            // opens, then backs out WITHOUT selecting any
+                            // contact - never completes an actual forward,
+                            // so nothing gets sent to anyone by mistake.
+                            hasTriedVoiceNoteForwardTap = true
+                            val forwardButton = findClickableMatchingRegex(root, FORWARD_DESC_REGEX)
+                            if (forwardButton != null) {
+                                EventLog.log("A11y-MediaDownload: ➡️ [ניסוי-B] נמצא \"העברה\" בתפריט הבחירה של ההודעה הקולית - לוחץ")
+                                forwardButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                handler.postDelayed({
+                                    EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-B] אבחון מסך לאחר לחיצה על העברה בהודעה קולית:")
+                                    rootInActiveWindow?.let { dumpFullNodeTree(it) }
+                                    // Diagnostic only - never select a
+                                    // contact/complete the forward. Back out.
+                                    performGlobalAction(GLOBAL_ACTION_BACK)
+                                }, 700L)
+                            } else {
+                                EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-B] לא נמצא \"העברה\" בתפריט הבחירה של ההודעה הקולית")
                             }
                         }
                         handler.postDelayed(this, SEARCH_INTERVAL_MS)

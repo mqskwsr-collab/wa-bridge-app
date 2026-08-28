@@ -243,6 +243,19 @@ object WaMediaLocator {
                         "dir.exists=${candidateDir.exists()} dir.canRead=${candidateDir.canRead()} dir.canExecute=${candidateDir.canExecute()} " +
                         "list()=${candidateDir.list()?.size ?: "null"} listFiles()=${filesHere.size}"
                 )
+                // FIX (28.8.2026, method B): the 28.8 08:37 on-device log
+                // showed a real mismatch here for "WhatsApp Audio" -
+                // list()=2 but listFiles()=0 - meaning 2 raw entries exist
+                // that the isFile() filter doesn't count as files (could
+                // be real files File.isFile() can't confirm due to a
+                // permission quirk, or could be subfolders/symlinks).
+                // Only a count was ever logged before, never the actual
+                // names - logging them now settles it directly instead of
+                // guessing.
+                val rawNames = candidateDir.list()
+                if (rawNames != null && rawNames.isNotEmpty() && rawNames.size != filesHere.size) {
+                    EventLog.log("Media: 🔎 אבחון - list() גולמי ל-${candidateDir.absolutePath}: ${rawNames.joinToString(" | ")}")
+                }
             }
 
             val matchHere = filesHere
@@ -525,6 +538,21 @@ object WaMediaLocator {
                     val sub = File(root, name)
                     val subChildren = sub.list()?.sorted() ?: emptyList()
                     EventLog.log("Media: 🔎 אבחון - תוכן \"$name\": ${if (subChildren.isEmpty()) "(ריקה)" else subChildren.joinToString(" | ")}")
+                    // FIX (28.8.2026, method B): previously stopped here -
+                    // never actually looked INSIDE "Media" to see the real
+                    // subfolder names/contents (WhatsApp Images/Video/Voice
+                    // Notes/Audio/etc.), only confirmed "Media" itself
+                    // exists as a name. Recurse one more level into it.
+                    val mediaDir = File(sub, "Media")
+                    if (mediaDir.isDirectory) {
+                        val mediaChildren = mediaDir.list()?.sorted() ?: emptyList()
+                        EventLog.log("Media: 🔎 אבחון - תוכן \"$name/Media\": ${if (mediaChildren.isEmpty()) "(ריקה)" else mediaChildren.joinToString(" | ")}")
+                        mediaChildren.forEach { mName ->
+                            val mSub = File(mediaDir, mName)
+                            val mSubCount = mSub.listFiles { f -> f.isFile }?.size ?: -1
+                            EventLog.log("Media: 🔎 אבחון -   \"$name/Media/$mName\" - $mSubCount קבצים")
+                        }
+                    }
                 }
             }
 
@@ -532,6 +560,23 @@ object WaMediaLocator {
             val androidMediaChildren = androidMedia.list()?.sorted() ?: emptyList()
             val waPkgLike = androidMediaChildren.filter { it.contains("whatsapp", ignoreCase = true) }
             EventLog.log("Media: 🔎 אבחון - חבילות עם \"whatsapp\" תחת Android/media: ${if (waPkgLike.isEmpty()) "(אין)" else waPkgLike.joinToString(" | ")}")
+            // FIX (28.8.2026, method B): previously stopped at confirming
+            // the package folder's NAME exists, never looked inside it -
+            // the 19.8.2026 comment above ("completely empty") may be
+            // stale for this device/WhatsApp version. Recurse two levels
+            // in for every whatsapp-like package found under Android/media.
+            waPkgLike.forEach { pkgName ->
+                val pkgDir = File(androidMedia, pkgName)
+                val pkgChildren = pkgDir.list()?.sorted() ?: emptyList()
+                EventLog.log("Media: 🔎 אבחון - תוכן \"Android/media/$pkgName\": ${if (pkgChildren.isEmpty()) "(ריקה)" else pkgChildren.joinToString(" | ")}")
+                pkgChildren.forEach { childName ->
+                    val childDir = File(pkgDir, childName)
+                    if (childDir.isDirectory) {
+                        val grandChildren = childDir.list()?.sorted() ?: emptyList()
+                        EventLog.log("Media: 🔎 אבחון -   תוכן \"Android/media/$pkgName/$childName\": ${if (grandChildren.isEmpty()) "(ריקה)" else grandChildren.joinToString(" | ")}")
+                    }
+                }
+            }
         } catch (e: Exception) {
             EventLog.log("Media: 🔎 אבחון נכשל: ${e.javaClass.simpleName}: ${e.message}")
         }
