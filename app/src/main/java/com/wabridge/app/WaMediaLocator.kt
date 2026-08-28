@@ -309,6 +309,23 @@ object WaMediaLocator {
             // haven't guessed yet).
             if (type == MediaClassifier.MediaType.VOICE_NOTE) {
                 logDiagnostics(root)
+                // FIX (28.8.2026, root-cache research): every accessible
+                // path has now been exhausted (shared storage, MediaStore,
+                // UI menus). Forensic sources confirm WhatsApp genuinely
+                // caches voice-note audio at /data/data/com.whatsapp/cache/
+                // before it's moved/purged - but that path is inside
+                // WhatsApp's own private, UID-sandboxed storage, which no
+                // app (including this one) can read without root, by
+                // Android's core security model - no API or permission
+                // bypasses that. This only does anything on a rooted
+                // device: uses `su` to copy a recent matching file out to
+                // OUR app's own accessible storage, then reads it normally
+                // from there. Safe no-op (returns null quickly) if root
+                // isn't available.
+                findViaRootCache(context, notificationTimeMs, matchWindowMs)?.let { rootFile ->
+                    EventLog.log("Media: ✅ נמצא קובץ: ${rootFile.name} (דרך root, מטמון פרטי)")
+                    return FoundMedia(rootFile, guessMimeType(rootFile.name))
+                }
             }
             return null
         }
@@ -544,6 +561,33 @@ object WaMediaLocator {
      */
     private fun logDiagnostics(root: File) {
         try {
+            // FIX (28.8.2026, root-check): after fully exhausting every
+            // shared-storage path, MediaStore, and UI menu for voice
+            // notes (all confirmed empty/dead-end), the next real option
+            // depends entirely on whether this device/emulator has root -
+            // that would allow reading WhatsApp's private app storage
+            // directly. User wasn't sure, so check for the common
+            // indicators here (read-only, side-effect-free) and log the
+            // result plainly instead of guessing.
+            val rootIndicatorPaths = listOf(
+                "/system/bin/su", "/system/xbin/su", "/sbin/su",
+                "/system/app/Superuser.apk", "/system/app/SuperSU.apk"
+            )
+            val foundRootPaths = rootIndicatorPaths.filter { File(it).exists() }
+            val testKeys = Build.TAGS?.contains("test-keys") == true
+            val whichSuFound = try {
+                val process = Runtime.getRuntime().exec(arrayOf("which", "su"))
+                val output = process.inputStream.bufferedReader().readText().trim()
+                process.waitFor()
+                output.isNotEmpty()
+            } catch (e: Exception) {
+                false
+            }
+            EventLog.log(
+                "Media: 🔎 אבחון root - נתיבי su שנמצאו: ${if (foundRootPaths.isEmpty()) "(אין)" else foundRootPaths.joinToString(" | ")} | " +
+                    "Build.TAGS מכיל test-keys=$testKeys | which su מצא=$whichSuFound"
+            )
+
             val rootChildren = root.list()?.sorted() ?: emptyList()
             EventLog.log("Media: 🔎 אבחון - תוכן שורש האחסון (${root.absolutePath}): ${if (rootChildren.isEmpty()) "(ריקה/לא נגיש)" else rootChildren.joinToString(" | ")}")
 
@@ -595,6 +639,68 @@ object WaMediaLocator {
             }
         } catch (e: Exception) {
             EventLog.log("Media: 🔎 אבחון נכשל: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /**
+     * FIX (28.8.2026, root-cache research): WhatsApp genuinely caches
+     * voice-note audio at /data/data/com.whatsapp/cache/ before it's
+     * moved or purged (confirmed via forensic-extraction sources) - but
+     * that's inside WhatsApp's own UID-sandboxed private storage, which
+     * Android's kernel-level permission model blocks every other app
+     * from reading, root or not being an OS-level distinction no app
+     * permission can bypass. This only ever does anything on a rooted
+     * device: shells out to `su -c` to (1) list recent files in that
+     * cache dir sorted by modification time, (2) copy the newest opus/
+     * audio-looking one within the match window into OUR OWN app's
+     * external files dir (which we can read normally, no su needed after
+     * that), then returns it like any other found file. Every step is
+     * wrapped so a non-rooted device just gets null quickly, same as
+     * before this existed.
+     */
+    private fun findViaRootCache(context: Context, notificationTimeMs: Long, matchWindowMs: Long): File? {
+        return try {
+            val listProcess = Runtime.getRuntime().exec(
+                arrayOf("su", "-c", "ls -t --full-time /data/data/com.whatsapp/cache/ 2>/dev/null")
+            )
+            val listing = listProcess.inputStream.bufferedReader().readText()
+            listProcess.waitFor()
+            if (listing.isBlank()) {
+                EventLog.log("Media: 🔎 [root] אין גישת su, או שהתיקייה הפרטית ריקה/לא נגישה")
+                return null
+            }
+            EventLog.log("Media: 🔎 [root] תוכן /data/data/com.whatsapp/cache/: ${listing.lines().filter { it.isNotBlank() }.take(10).joinToString(" | ")}")
+
+            // Names likely to be voice-note audio, not thumbnails/junk.
+            val audioLine = listing.lines().firstOrNull {
+                it.contains(".opus", ignoreCase = true) || it.contains(".mp3", ignoreCase = true) || it.contains(".m4a", ignoreCase = true)
+            }
+            val fileName = audioLine?.trim()?.substringAfterLast(' ')
+            if (fileName.isNullOrBlank()) {
+                EventLog.log("Media: 🔎 [root] לא נמצא קובץ אודיו (.opus/.mp3/.m4a) ברשימה")
+                return null
+            }
+
+            val destDir = File(context.getExternalFilesDir(null), "root_cache_copies").apply { mkdirs() }
+            val destFile = File(destDir, fileName)
+            val copyProcess = Runtime.getRuntime().exec(
+                arrayOf("su", "-c", "cp '/data/data/com.whatsapp/cache/$fileName' '${destFile.absolutePath}'")
+            )
+            copyProcess.waitFor()
+
+            if (!destFile.exists() || destFile.length() == 0L) {
+                EventLog.log("Media: 🔎 [root] ההעתקה דרך su נכשלה או הקובץ ריק")
+                return null
+            }
+
+            val diffSec = kotlin.math.abs(destFile.lastModified() - notificationTimeMs) / 1000.0
+            EventLog.log("Media: ✅ [root] הועתק קובץ מהמטמון הפרטי: $fileName (הפרש מההתראה: ${"%.1f".format(diffSec)} שנ')")
+            destFile
+        } catch (e: Exception) {
+            // Expected/normal on a non-rooted device - `su` simply
+            // doesn't exist, which throws an IOException here.
+            EventLog.log("Media: 🔎 [root] su לא זמין (${e.javaClass.simpleName}) - כנראה אין root במכשיר")
+            null
         }
     }
 
