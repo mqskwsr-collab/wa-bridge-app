@@ -83,6 +83,17 @@ object WaMediaLocator {
     // marker) - worth trying this second name too before concluding the
     // file isn't reachable via folder scan at all.
     private const val SUBFOLDER_VOICE_NOTES_ALT = "WhatsApp Audio"
+    // FIX (28.8.2026, breakthrough): the 09:49 on-device log's raw
+    // list() dump for "WhatsApp Audio" showed exactly 2 entries -
+    // "Sent" and "Private" - which is why list()=2 but listFiles()=0
+    // (they're subfolders, not files, so the isFile() filter correctly
+    // excludes them - not a permission bug after all). The broader
+    // recursive scan confirmed WhatsApp Audio itself has 0 direct files,
+    // consistent with everything actually living one level deeper in
+    // these two subfolders. "Private" = received in a 1:1 chat (our
+    // case); "Sent" = recorded/sent by this device. Try both.
+    private const val SUBFOLDER_VOICE_NOTES_AUDIO_PRIVATE = "WhatsApp Audio/Private"
+    private const val SUBFOLDER_VOICE_NOTES_AUDIO_SENT = "WhatsApp Audio/Sent"
 
     // How far back (and slightly forward, to absorb clock/IO ordering
     // slack between "file written" and "notification posted") from the
@@ -179,7 +190,12 @@ object WaMediaLocator {
         val subfolders = when (type) {
             MediaClassifier.MediaType.IMAGE -> listOf(SUBFOLDER_IMAGES)
             MediaClassifier.MediaType.VIDEO -> listOf(SUBFOLDER_VIDEO)
-            MediaClassifier.MediaType.VOICE_NOTE -> listOf(SUBFOLDER_VOICE_NOTES, SUBFOLDER_VOICE_NOTES_ALT)
+            MediaClassifier.MediaType.VOICE_NOTE -> listOf(
+                SUBFOLDER_VOICE_NOTES_AUDIO_PRIVATE,
+                SUBFOLDER_VOICE_NOTES_AUDIO_SENT,
+                SUBFOLDER_VOICE_NOTES,
+                SUBFOLDER_VOICE_NOTES_ALT
+            )
             MediaClassifier.MediaType.NONE -> return null
         }
 
