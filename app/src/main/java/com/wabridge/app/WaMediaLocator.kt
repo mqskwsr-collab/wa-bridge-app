@@ -74,6 +74,15 @@ object WaMediaLocator {
     private const val SUBFOLDER_IMAGES = "WhatsApp Images"
     private const val SUBFOLDER_VIDEO = "WhatsApp Video"
     private const val SUBFOLDER_VOICE_NOTES = "WhatsApp Voice Notes"
+    // FIX (28.8.2026, voice-note research): web research on where
+    // WhatsApp actually stores voice messages turned up a SECOND,
+    // differently-named folder used on some Android/WhatsApp versions -
+    // "WhatsApp Audio" - distinct from "WhatsApp Voice Notes". Our own
+    // on-device logs so far only ever checked the "Voice Notes" name
+    // (and found it present but essentially empty, just a .nomedia
+    // marker) - worth trying this second name too before concluding the
+    // file isn't reachable via folder scan at all.
+    private const val SUBFOLDER_VOICE_NOTES_ALT = "WhatsApp Audio"
 
     // How far back (and slightly forward, to absorb clock/IO ordering
     // slack between "file written" and "notification posted") from the
@@ -167,10 +176,10 @@ object WaMediaLocator {
             return null
         }
 
-        val subfolder = when (type) {
-            MediaClassifier.MediaType.IMAGE -> SUBFOLDER_IMAGES
-            MediaClassifier.MediaType.VIDEO -> SUBFOLDER_VIDEO
-            MediaClassifier.MediaType.VOICE_NOTE -> SUBFOLDER_VOICE_NOTES
+        val subfolders = when (type) {
+            MediaClassifier.MediaType.IMAGE -> listOf(SUBFOLDER_IMAGES)
+            MediaClassifier.MediaType.VIDEO -> listOf(SUBFOLDER_VIDEO)
+            MediaClassifier.MediaType.VOICE_NOTE -> listOf(SUBFOLDER_VOICE_NOTES, SUBFOLDER_VOICE_NOTES_ALT)
             MediaClassifier.MediaType.NONE -> return null
         }
 
@@ -190,8 +199,9 @@ object WaMediaLocator {
         // file regardless of which physical folder it's actually in,
         // which WhatsApp's "Save" must insert into to be scoped-storage
         // compliant. Falls back to the old folder-scanning approach
-        // below only if MediaStore has nothing recent (e.g. voice notes,
-        // which often aren't MediaStore-indexed at all).
+        // below only if MediaStore has nothing recent. FIX (28.8.2026):
+        // now also tried for VOICE_NOTE via the Audio collection - see
+        // findViaMediaStore's own doc comment.
         findViaMediaStore(context, type, notificationTimeMs, matchWindowMs)?.let { return it }
 
         val root = Environment.getExternalStorageDirectory()
@@ -209,6 +219,7 @@ object WaMediaLocator {
         var bestDir: File? = null
 
         for (basePath in CANDIDATE_BASE_PATHS) {
+            for (subfolder in subfolders) {
             val candidateDir = File(root, "$basePath/$subfolder")
             if (!candidateDir.isDirectory) continue
             triedDirs.add(candidateDir)
@@ -241,10 +252,11 @@ object WaMediaLocator {
                 bestFile = matchHere
                 bestDir = candidateDir
             }
+            }
         }
 
         if (triedDirs.isEmpty()) {
-            val tried = CANDIDATE_BASE_PATHS.joinToString(" , ") { File(root, "$it/$subfolder").absolutePath }
+            val tried = CANDIDATE_BASE_PATHS.flatMap { base -> subfolders.map { sf -> File(root, "$base/$sf").absolutePath } }.joinToString(" , ")
             Log.w(TAG, "Media folder not found in any candidate path: $tried")
             EventLog.log("Media: ⚠️ תיקיית מדיה לא נמצאה באף אחד מהנתיבים: $tried")
             logDiagnostics(root)
@@ -257,6 +269,18 @@ object WaMediaLocator {
             Log.w(TAG, "No recent file matched in any of: ${triedDirs.joinToString(" , ") { it.absolutePath }} within ${matchWindowMs}ms of $notificationTimeMs")
             EventLog.log("Media: ⚠️ לא נמצא קובץ תואם בזמן באף אחת מ-${triedDirs.size} תיקיות שנבדקו")
             triedDirs.forEach { d -> logCandidateTimings(d, d.listFiles { f -> f.isFile } ?: emptyArray(), notificationTimeMs) }
+            // FIX (28.8.2026, voice-note research): for voice notes
+            // specifically, ALSO run the broad whatsapp-folder scan here
+            // (previously this only ran when triedDirs was completely
+            // EMPTY, i.e. no candidate folder existed at all) - voice
+            // notes so far always find an existing-but-empty folder, so
+            // the broad scan never ran and we never got a full picture
+            // of what other whatsapp-named folders actually exist on
+            // this device (e.g. a correctly-named audio folder we
+            // haven't guessed yet).
+            if (type == MediaClassifier.MediaType.VOICE_NOTE) {
+                logDiagnostics(root)
+            }
             return null
         }
         val dir = bestDir!!
@@ -268,21 +292,34 @@ object WaMediaLocator {
     }
 
     /**
-     * Queries MediaStore for the newest IMAGE/VIDEO row added within the
-     * match window, regardless of which physical folder it lives in -
-     * see the long FIX (23.8.2026) comment in findRecentMediaFile for
-     * why this exists. MediaStore's DATE_ADDED/DATE_MODIFIED columns are
-     * in SECONDS (not ms) - converted accordingly. VOICE_NOTE is skipped
-     * entirely: WhatsApp voice notes (.opus) are frequently not
-     * MediaStore-indexed at all, so a query would reliably return
-     * nothing useful; the folder-scan fallback handles that type.
+     * Queries MediaStore for the newest IMAGE/VIDEO/VOICE_NOTE row added
+     * within the match window, regardless of which physical folder it
+     * lives in - see the long FIX (23.8.2026) comment in
+     * findRecentMediaFile for why this exists. MediaStore's DATE_ADDED/
+     * DATE_MODIFIED columns are in SECONDS (not ms) - converted
+     * accordingly. FIX (28.8.2026): VOICE_NOTE used to be skipped here on
+     * an untested assumption that voice notes are never MediaStore-
+     * indexed - now actually queries the Audio collection to check for
+     * real, since that assumption was never verified against Audio
+     * specifically (only Images/Video were ever tried).
      */
     private fun findViaMediaStore(context: Context, type: MediaClassifier.MediaType, notificationTimeMs: Long, matchWindowMs: Long): FoundMedia? {
         val collection = when (type) {
             MediaClassifier.MediaType.IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
             MediaClassifier.MediaType.VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            // FIX (28.8.2026, voice-note research): previously skipped
+            // entirely on the assumption voice notes are "frequently not
+            // MediaStore-indexed at all" - but that assumption was never
+            // actually tested against the Audio collection specifically
+            // (only Images/Video were ever queried). WhatsApp voice notes
+            // are real .opus/audio files; if WhatsApp (or the eventual
+            // real save flow) writes them through a MediaStore-compliant
+            // API, they'd show up here under Audio, not Images/Video.
+            // Worth checking for real instead of assuming.
+            MediaClassifier.MediaType.VOICE_NOTE -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
             else -> return null
         }
+
 
         val windowSec = matchWindowMs / 1000
         val notificationSec = notificationTimeMs / 1000
