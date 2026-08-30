@@ -272,6 +272,20 @@ class WaSendAccessibilityService : AccessibilityService() {
     // the voice note should still be playing, to see if any different
     // controls appear during playback that a long-press never reveals.
     private var hasTriedVoiceNotePlaybackTap = false
+    // FIX (30.8.2026, race-condition, same lesson applied proactively):
+    // Method C also lacked a "truly completed" flag - fixed before
+    // chaining Method E after it.
+    private var voiceNotePlaybackTapCompleted = false
+    // FIX (30.8.2026, duplicate-node theory): METHOD E - every voice-note
+    // dump has shown "More options" appearing TWICE at identical bounds.
+    // Method A always tapped the FIRST match (findClickableMatchingRegex)
+    // and always got the generic chat dropdown. External WhatsApp
+    // documentation says selecting a message and tapping its ⋮ should
+    // show a small "Share/Pin" menu instead - suggesting the FIRST match
+    // is a stale/underlying node and the SELECTION toolbar's real one is
+    // the SECOND. This retries with findLastClickableMatchingRegex to
+    // test that theory directly.
+    private var hasTriedVoiceNoteLastMoreOptionsTap = false
     // FIX (27.8.2026, race-condition bug): the 27.8 21:37 on-device log
     // showed the "More options" tap firing BEFORE the long-press
     // gesture's own onCompleted callback log line - SEARCH_INTERVAL_MS
@@ -439,6 +453,8 @@ class WaSendAccessibilityService : AccessibilityService() {
             hasTriedVoiceNoteForwardTap = false
             voiceNoteForwardTapCompleted = false
             hasTriedVoiceNotePlaybackTap = false
+            voiceNotePlaybackTapCompleted = false
+            hasTriedVoiceNoteLastMoreOptionsTap = false
             voiceNoteLongPressCompleted = false
             lastMediaDownloadDumpTime = 0L
             dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
@@ -1224,9 +1240,34 @@ class WaSendAccessibilityService : AccessibilityService() {
                                         findBottommostMatchingDescription(freshRoot, VOICE_NOTE_PLAY_BUTTON_REGEX)
                                             ?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                                     }
+                                    voiceNotePlaybackTapCompleted = true
                                 }, 1200L)
                             } else {
                                 EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-C] לא נמצא כפתור נגן להודעה קולית ללחיצה רגילה")
+                                voiceNotePlaybackTapCompleted = true
+                            }
+                        } else if (job.mediaType == MediaClassifier.MediaType.VOICE_NOTE &&
+                            voiceNotePlaybackTapCompleted && !hasTriedVoiceNoteLastMoreOptionsTap
+                        ) {
+                            // FIX (30.8.2026, duplicate-node theory):
+                            // METHOD E - re-tries "More options" but takes
+                            // the LAST match in tree order instead of the
+                            // first (findLastClickableMatchingRegex), on
+                            // the theory that the stale/underlying header
+                            // button (not the current selection toolbar's)
+                            // was being hit every previous time.
+                            hasTriedVoiceNoteLastMoreOptionsTap = true
+                            val lastMoreOptions = findLastClickableMatchingRegex(root, MORE_OPTIONS_DESC_REGEX)
+                            if (lastMoreOptions != null) {
+                                EventLog.log("A11y-MediaDownload: ⋮ [ניסוי-E] נמצא \"More options\" (ההתאמה האחרונה בעץ) - לוחץ")
+                                lastMoreOptions.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                handler.postDelayed({
+                                    EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-E] אבחון תפריט לאחר לחיצה על ההתאמה האחרונה של More options:")
+                                    rootInActiveWindow?.let { dumpFullNodeTree(it) }
+                                    performGlobalAction(GLOBAL_ACTION_BACK)
+                                }, 700L)
+                            } else {
+                                EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-E] לא נמצא \"More options\" (התאמה אחרונה)")
                             }
                         }
                         handler.postDelayed(this, SEARCH_INTERVAL_MS)
@@ -2012,6 +2053,44 @@ class WaSendAccessibilityService : AccessibilityService() {
             if (found != null) return found
         }
         return null
+    }
+
+    /**
+     * FIX (30.8.2026, "More options" duplicate-node theory): every single
+     * voice-note dump so far has shown "More options" appearing TWICE in
+     * the tree, at the EXACT SAME bounds (Rect(0,56-80,152)) - once
+     * before the selection toolbar's own row (תשובה/סימון בכוכב/מחיקה/
+     * העברה/הצמדה), and once after it. That strongly suggests the
+     * ORIGINAL (non-selection) header's "More options" button is still
+     * present underneath/behind the selection toolbar, not properly
+     * hidden - and findClickableMatchingRegex's DFS returns on the FIRST
+     * match, which multiple external sources describe should show
+     * "Share, Pin, ..." for a per-message selection but which our tests
+     * always show as the generic chat-level dropdown instead. This is
+     * the same DFS as findClickableMatchingRegex but keeps searching and
+     * returns the LAST match instead of the first - on the theory that
+     * the selection toolbar's own (correct, currently-relevant) instance
+     * renders after the stale one in tree order.
+     */
+    private fun findLastClickableMatchingRegex(node: AccessibilityNodeInfo, regex: Regex): AccessibilityNodeInfo? {
+        var last: AccessibilityNodeInfo? = null
+        val text = node.text?.toString() ?: node.contentDescription?.toString()
+        if (text != null && regex.containsMatchIn(text)) {
+            var n: AccessibilityNodeInfo? = node
+            while (n != null) {
+                if (n.isClickable) {
+                    last = n
+                    break
+                }
+                n = n.parent
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val foundInChild = findLastClickableMatchingRegex(child, regex)
+            if (foundInChild != null) last = foundInChild
+        }
+        return last
     }
 
     /** Like findClickableByText but matches if the candidate is CONTAINED in the node's text (broader, last-resort). */
