@@ -210,6 +210,15 @@ class WaSendAccessibilityService : AccessibilityService() {
         // per-item actions (if any) differ from the message-selection
         // toolbar's.
         private val MEDIA_LINKS_DOCS_REGEX = Regex("""(מדיה,? קישורים ומסמכים|media,? links,? and docs|media,? links & docs)""", RegexOption.IGNORE_CASE)
+        // FIX (30.8.2026, method F): "שיתוף" (Share) - found inside the
+        // SMALL per-message menu Method E revealed (the real fix for the
+        // duplicate-node bug: אימות קוד האבטחה/שיתוף/דיווח, not the
+        // generic chat dropdown Method A kept hitting). Tapping this on
+        // a real message normally triggers Android's system share sheet
+        // with the actual file attached via ACTION_SEND - if so, this
+        // could be the real breakthrough (e.g. share straight to Gmail,
+        // no folder-hunting needed at all).
+        private val SHARE_DESC_REGEX = Regex("""(‏שיתוף|שיתוף|share)""", RegexOption.IGNORE_CASE)
         // FIX (23.8.2026, full-album swipe): label of the container node
         // that holds the currently-displayed full-screen image (seen in
         // the on-device dump as a ViewGroup with label='הגדלת התמונה'
@@ -1263,8 +1272,29 @@ class WaSendAccessibilityService : AccessibilityService() {
                                 lastMoreOptions.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                                 handler.postDelayed({
                                     EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-E] אבחון תפריט לאחר לחיצה על ההתאמה האחרונה של More options:")
-                                    rootInActiveWindow?.let { dumpFullNodeTree(it) }
-                                    performGlobalAction(GLOBAL_ACTION_BACK)
+                                    val menuRoot = rootInActiveWindow
+                                    if (menuRoot != null) dumpFullNodeTree(menuRoot)
+                                    // FIX (30.8.2026, method F): this is
+                                    // the CORRECT small per-message menu
+                                    // (confirmed by a real device log:
+                                    // אימות קוד האבטחה/שיתוף/דיווח) -
+                                    // tap "שיתוף"/Share, which on a real
+                                    // message normally opens Android's
+                                    // system share sheet with the actual
+                                    // file attached.
+                                    val shareItem = menuRoot?.let { findClickableMatchingRegex(it, SHARE_DESC_REGEX) }
+                                    if (shareItem != null) {
+                                        EventLog.log("A11y-MediaDownload: 📤 [ניסוי-F] נמצא \"שיתוף\" - לוחץ")
+                                        shareItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                        handler.postDelayed({
+                                            EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-F] אבחון מסך השיתוף:")
+                                            rootInActiveWindow?.let { dumpFullNodeTree(it) }
+                                            performGlobalAction(GLOBAL_ACTION_BACK)
+                                        }, 900L)
+                                    } else {
+                                        EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-F] לא נמצא \"שיתוף\" בתפריט")
+                                        performGlobalAction(GLOBAL_ACTION_BACK)
+                                    }
                                 }, 700L)
                             } else {
                                 EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-E] לא נמצא \"More options\" (התאמה אחרונה)")
