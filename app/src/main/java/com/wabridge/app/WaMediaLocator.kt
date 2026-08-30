@@ -309,6 +309,23 @@ object WaMediaLocator {
             // haven't guessed yet).
             if (type == MediaClassifier.MediaType.VOICE_NOTE) {
                 logDiagnostics(root)
+                // FIX (30.8.2026, method G breakthrough): a real
+                // on-device test confirmed the per-message "שיתוף"/Share
+                // menu has a native "Save as…" (Storage Access
+                // Framework) target, which - if our new accessibility
+                // flow completes it - writes the actual file via the
+                // system's document-creation picker. That picker
+                // defaults to the plain top-level Downloads folder
+                // (confirmed present at storage root: "Download"), NOT
+                // any WhatsApp-specific path, so check there directly.
+                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val downloadsMatch = downloadsDir.listFiles { f -> f.isFile }
+                    ?.filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= matchWindowMs }
+                    ?.maxByOrNull { it.lastModified() }
+                if (downloadsMatch != null) {
+                    EventLog.log("Media: ✅ נמצא קובץ בתיקיית ההורדות (דרך \"Save as…\"): ${downloadsMatch.name}")
+                    return FoundMedia(downloadsMatch, guessMimeType(downloadsMatch.name))
+                }
                 // FIX (28.8.2026, root-cache research): every accessible
                 // path has now been exhausted (shared storage, MediaStore,
                 // UI menus). Forensic sources confirm WhatsApp genuinely

@@ -219,6 +219,17 @@ class WaSendAccessibilityService : AccessibilityService() {
         // could be the real breakthrough (e.g. share straight to Gmail,
         // no folder-hunting needed at all).
         private val SHARE_DESC_REGEX = Regex("""(‏שיתוף|שיתוף|share)""", RegexOption.IGNORE_CASE)
+        // FIX (30.8.2026, method G): "Save as…" - a native Android
+        // Storage Access Framework target confirmed present in the real
+        // share sheet (WhatsApp/WhatsApp/Bluetooth/Quick Share/"Save
+        // as…"). This writes the actual raw file via the system
+        // document-creation picker - no folder-guessing needed at all
+        // once this completes.
+        private val SAVE_AS_DESC_REGEX = Regex("""(save as|שמירה בשם|שמור בשם)""", RegexOption.IGNORE_CASE)
+        // The SAF picker's own confirm button - varies by Android/OEM
+        // ("SAVE", "שמור", sometimes just a checkmark icon with this
+        // description).
+        private val SAVE_CONFIRM_BUTTON_REGEX = Regex("""^(save|שמור)$""", RegexOption.IGNORE_CASE)
         // FIX (23.8.2026, full-album swipe): label of the container node
         // that holds the currently-displayed full-screen image (seen in
         // the on-device dump as a ViewGroup with label='הגדלת התמונה'
@@ -1288,8 +1299,71 @@ class WaSendAccessibilityService : AccessibilityService() {
                                         shareItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                                         handler.postDelayed({
                                             EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-F] אבחון מסך השיתוף:")
-                                            rootInActiveWindow?.let { dumpFullNodeTree(it) }
-                                            performGlobalAction(GLOBAL_ACTION_BACK)
+                                            val shareRoot = rootInActiveWindow
+                                            if (shareRoot != null) dumpFullNodeTree(shareRoot)
+                                            // FIX (30.8.2026, method G):
+                                            // the share sheet includes a
+                                            // native "Save as…" target -
+                                            // Android's Storage Access
+                                            // Framework document-creation
+                                            // picker. Tap it; it should
+                                            // open a system picker with a
+                                            // filename + a save/confirm
+                                            // button - accept whatever
+                                            // default location/filename it
+                                            // offers by finding and
+                                            // tapping that confirm button.
+                                            val saveAsItem = shareRoot?.let { findClickableMatchingRegex(it, SAVE_AS_DESC_REGEX) }
+                                            if (saveAsItem != null) {
+                                                EventLog.log("A11y-MediaDownload: 💾 [ניסוי-G] נמצא \"Save as…\" - לוחץ")
+                                                saveAsItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                                handler.postDelayed({
+                                                    EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-G] אבחון מסך שמירה (SAF):")
+                                                    val safRoot = rootInActiveWindow
+                                                    if (safRoot != null) dumpFullNodeTree(safRoot)
+                                                    val confirmSaveButton = safRoot?.let { findClickableMatchingRegex(it, SAVE_CONFIRM_BUTTON_REGEX) }
+                                                    if (confirmSaveButton != null) {
+                                                        EventLog.log("A11y-MediaDownload: ✅ [ניסוי-G] נמצא כפתור אישור שמירה - לוחץ (מקבל מיקום/שם ברירת מחדל)")
+                                                        confirmSaveButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                                        handler.postDelayed({
+                                                            EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-G] אבחון מסך אחרי אישור השמירה:")
+                                                            rootInActiveWindow?.let { dumpFullNodeTree(it) }
+                                                            performGlobalAction(GLOBAL_ACTION_BACK)
+                                                            // FIX (30.8.2026, method G completion): voice
+                                                            // notes never reach mediaDownloadStage=1 (the
+                                                            // normal polling stage that would otherwise
+                                                            // catch this) - all these UI experiments run
+                                                            // entirely inside stage 0's else-branch. So the
+                                                            // save just performed here would otherwise go
+                                                            // undetected until the plain 14s timeout gives
+                                                            // up. Check directly, right now, whether the SAF
+                                                            // save actually produced a file, and complete the
+                                                            // job immediately if so - same success path
+                                                            // images/videos use in stage 1.
+                                                            val savedFile = WaMediaLocator.findRecentMediaFile(
+                                                                this@WaSendAccessibilityService,
+                                                                job.mediaType,
+                                                                mediaDownloadStartTime,
+                                                                matchWindowMs = (System.currentTimeMillis() - mediaDownloadStartTime) + 5000L
+                                                            )
+                                                            if (savedFile != null) {
+                                                                EventLog.log("A11y-MediaDownload: ✅ [ניסוי-G] הקובץ נמצא אחרי השמירה - ${savedFile.file.name} - מדווח הצלחה")
+                                                                downloadingMedia = false
+                                                                MediaDownloadCoordinator.reportResult(MediaDownloadCoordinator.Result.SUCCESS)
+                                                                goHomeToCloseWhatsAppChat()
+                                                            } else {
+                                                                EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-G] לא נמצא קובץ חדש מיד אחרי השמירה")
+                                                            }
+                                                        }, 900L)
+                                                    } else {
+                                                        EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-G] לא נמצא כפתור אישור שמירה")
+                                                        performGlobalAction(GLOBAL_ACTION_BACK)
+                                                    }
+                                                }, 900L)
+                                            } else {
+                                                EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-G] לא נמצא \"Save as…\" בתפריט השיתוף")
+                                                performGlobalAction(GLOBAL_ACTION_BACK)
+                                            }
                                         }, 900L)
                                     } else {
                                         EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-F] לא נמצא \"שיתוף\" בתפריט")
