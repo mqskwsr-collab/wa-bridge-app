@@ -202,6 +202,14 @@ class WaSendAccessibilityService : AccessibilityService() {
         // avoid ever sending a real message to a real contact by
         // mistake.
         private val FORWARD_DESC_REGEX = Regex("""(‏העברה|העברה|forward)""", RegexOption.IGNORE_CASE)
+        // FIX (30.8.2026, method D): "מדיה, קישورים ומסמכים" (Media, links
+        // and docs) is one of the items INSIDE the generic chat-overflow
+        // menu Method A already opens (and previously just closed as a
+        // dead end) - never actually tapped into. It shows all media for
+        // the chat grouped by type; worth checking whether its own
+        // per-item actions (if any) differ from the message-selection
+        // toolbar's.
+        private val MEDIA_LINKS_DOCS_REGEX = Regex("""(מדיה,? קישורים ומסמכים|media,? links,? and docs|media,? links & docs)""", RegexOption.IGNORE_CASE)
         // FIX (23.8.2026, full-album swipe): label of the container node
         // that holds the currently-displayed full-screen image (seen in
         // the on-device dump as a ViewGroup with label='הגדלת התמונה'
@@ -250,6 +258,20 @@ class WaSendAccessibilityService : AccessibilityService() {
     // toolbar - taps "העברה"/Forward instead of "More options" and dumps
     // what opens (diagnostic-only, doesn't complete an actual forward).
     private var hasTriedVoiceNoteForwardTap = false
+    // FIX (28.8.2026, race-condition, same lesson applied proactively):
+    // Method B lacked its own "truly finished" flag, same bug class as
+    // Method A originally had - fixed before it ever caused a real
+    // failure this time, not after.
+    private var voiceNoteForwardTapCompleted = false
+    // FIX (30.8.2026, new avenue): Methods A and B, plus the full folder/
+    // MediaStore/root search, are all confirmed dead ends now (see
+    // /areas/wa-bridge.md). Both of those were tested via the LONG-PRESS
+    // selection toolbar though - NEVER via what the screen looks like
+    // during ACTIVE PLAYBACK (single tap, not long-press). Method C:
+    // single-taps the play button and dumps the tree ~1.2s later, while
+    // the voice note should still be playing, to see if any different
+    // controls appear during playback that a long-press never reveals.
+    private var hasTriedVoiceNotePlaybackTap = false
     // FIX (27.8.2026, race-condition bug): the 27.8 21:37 on-device log
     // showed the "More options" tap firing BEFORE the long-press
     // gesture's own onCompleted callback log line - SEARCH_INTERVAL_MS
@@ -415,6 +437,8 @@ class WaSendAccessibilityService : AccessibilityService() {
             hasTriedVoiceNoteMenuTap = false
             voiceNoteMenuTapCompleted = false
             hasTriedVoiceNoteForwardTap = false
+            voiceNoteForwardTapCompleted = false
+            hasTriedVoiceNotePlaybackTap = false
             voiceNoteLongPressCompleted = false
             lastMediaDownloadDumpTime = 0L
             dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
@@ -1108,14 +1132,34 @@ class WaSendAccessibilityService : AccessibilityService() {
                                 menuMoreOptions.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                                 handler.postDelayed({
                                     EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-A] אבחון תפריט לאחר לחיצה על More options בהודעה קולית:")
-                                    rootInActiveWindow?.let { dumpFullNodeTree(it) }
-                                    // FIX (28.8.2026, multi-method): this
-                                    // menu is a confirmed dead end (the
-                                    // generic chat overflow, no save item) -
-                                    // close it with BACK so it doesn't block
-                                    // the next method's screen state.
-                                    performGlobalAction(GLOBAL_ACTION_BACK)
-                                    voiceNoteMenuTapCompleted = true
+                                    val menuRoot = rootInActiveWindow
+                                    if (menuRoot != null) dumpFullNodeTree(menuRoot)
+                                    // FIX (30.8.2026, method D): instead of
+                                    // immediately closing this confirmed-
+                                    // dead-end menu, tap INTO "מדיה,
+                                    // קישורים ומסמכים" first - one more
+                                    // never-tried screen, reachable only
+                                    // from right here.
+                                    val mediaLinksDocs = menuRoot?.let { findClickableMatchingRegex(it, MEDIA_LINKS_DOCS_REGEX) }
+                                    if (mediaLinksDocs != null) {
+                                        EventLog.log("A11y-MediaDownload: 📂 [ניסוי-D] נמצא \"מדיה, קישורים ומסמכים\" - לוחץ")
+                                        mediaLinksDocs.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                        handler.postDelayed({
+                                            EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-D] אבחון מסך \"מדיה, קישורים ומסמכים\":")
+                                            rootInActiveWindow?.let { dumpFullNodeTree(it) }
+                                            performGlobalAction(GLOBAL_ACTION_BACK)
+                                            voiceNoteMenuTapCompleted = true
+                                        }, 700L)
+                                    } else {
+                                        EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-D] לא נמצא \"מדיה, קישורים ומסמכים\" בתפריט")
+                                        // FIX (28.8.2026, multi-method): this
+                                        // menu is a confirmed dead end (the
+                                        // generic chat overflow, no save item) -
+                                        // close it with BACK so it doesn't block
+                                        // the next method's screen state.
+                                        performGlobalAction(GLOBAL_ACTION_BACK)
+                                        voiceNoteMenuTapCompleted = true
+                                    }
                                 }, 700L)
                             } else {
                                 EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-A] לא נמצא \"More options\" בתפריט הבחירה של ההודעה הקולית")
@@ -1144,9 +1188,45 @@ class WaSendAccessibilityService : AccessibilityService() {
                                     // Diagnostic only - never select a
                                     // contact/complete the forward. Back out.
                                     performGlobalAction(GLOBAL_ACTION_BACK)
+                                    voiceNoteForwardTapCompleted = true
                                 }, 700L)
                             } else {
                                 EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-B] לא נמצא \"העברה\" בתפריט הבחירה של ההודעה הקולית")
+                                voiceNoteForwardTapCompleted = true
+                            }
+                        } else if (job.mediaType == MediaClassifier.MediaType.VOICE_NOTE &&
+                            voiceNoteForwardTapCompleted && !hasTriedVoiceNotePlaybackTap
+                        ) {
+                            // FIX (30.8.2026, new avenue): METHOD C - runs
+                            // after Method B truly finishes and backed out
+                            // to the plain chat screen. Single-taps the
+                            // play button (NOT long-press - a genuinely
+                            // different, never-before-tried interaction)
+                            // and dumps the tree ~1.2s later while playback
+                            // should still be ongoing (message is ~6-7s
+                            // long per the notification text), to check
+                            // for controls that only appear during active
+                            // playback. Then taps play again to stop it,
+                            // so we don't leave audio playing in the
+                            // background.
+                            hasTriedVoiceNotePlaybackTap = true
+                            val playButtonForTap = findBottommostMatchingDescription(root, VOICE_NOTE_PLAY_BUTTON_REGEX)
+                            if (playButtonForTap != null) {
+                                EventLog.log("A11y-MediaDownload: ▶️ [ניסוי-C] לוחץ לחיצה רגילה (לא ארוכה) על נגן ההודעה הקולית")
+                                playButtonForTap.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                handler.postDelayed({
+                                    EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-C] אבחון מסך תוך כדי ניגון ההודעה הקולית:")
+                                    rootInActiveWindow?.let { dumpFullNodeTree(it) }
+                                    // Stop playback so nothing keeps
+                                    // playing in the background after this
+                                    // experiment.
+                                    rootInActiveWindow?.let { freshRoot ->
+                                        findBottommostMatchingDescription(freshRoot, VOICE_NOTE_PLAY_BUTTON_REGEX)
+                                            ?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                    }
+                                }, 1200L)
+                            } else {
+                                EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-C] לא נמצא כפתור נגן להודעה קולית ללחיצה רגילה")
                             }
                         }
                         handler.postDelayed(this, SEARCH_INTERVAL_MS)
