@@ -322,6 +322,20 @@ class WaSendAccessibilityService : AccessibilityService() {
     // the long-press has truly finished and the real selection toolbar
     // is on screen.
     private var voiceNoteLongPressCompleted = false
+    // FIX (31.8.2026, wrong-bubble theory): user visually watched the
+    // device and saw the automation open the target recording, then
+    // seemingly switch to a PREVIOUS/different recording. Every method
+    // (long-press target, Method C tap, Method C stop-tap) independently
+    // re-runs findBottommostMatchingDescription fresh on whatever the
+    // CURRENT screen happens to show - with no check that it's still the
+    // same bubble. If the chat's scroll position shifts between steps
+    // (e.g. after backing out of the Forward picker or the Media/Links/
+    // Docs screen), "bottommost visible" can silently latch onto a
+    // different, older voice note that now happens to sit at the bottom
+    // of the (scrolled) viewport. This stores the bounds of the ORIGINAL
+    // long-press target so every later re-detection can be logged
+    // against it and any mismatch is visible instead of silent.
+    private var originalVoiceNoteButtonBounds: Rect? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private var searching = false
@@ -1128,6 +1142,10 @@ class WaSendAccessibilityService : AccessibilityService() {
                             if (playButton != null) {
                                 val r = Rect()
                                 playButton.getBoundsInScreen(r)
+                                // FIX (31.8.2026, wrong-bubble theory): remember
+                                // THIS bubble's position as the target for every
+                                // later re-detection to be checked against.
+                                originalVoiceNoteButtonBounds = Rect(r)
                                 EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] נמצא כפתור השמעת הקלטה ב-$r - מנסה לחיצה ארוכה כדי לחשוף תפריט הודעה")
                                 val longPressPath = Path().apply { moveTo(r.centerX().toFloat(), r.centerY().toFloat()) }
                                 val longPressGesture = GestureDescription.Builder()
@@ -1248,6 +1266,11 @@ class WaSendAccessibilityService : AccessibilityService() {
                             hasTriedVoiceNotePlaybackTap = true
                             val playButtonForTap = findBottommostMatchingDescription(root, VOICE_NOTE_PLAY_BUTTON_REGEX)
                             if (playButtonForTap != null) {
+                                // FIX (31.8.2026, wrong-bubble theory): log
+                                // whether this re-detected button is still
+                                // the same bubble the long-press originally
+                                // targeted, BEFORE tapping it.
+                                logBubbleConsistencyCheck(playButtonForTap, "ניסוי-C tap")
                                 EventLog.log("A11y-MediaDownload: ▶️ [ניסוי-C] לוחץ לחיצה רגילה (לא ארוכה) על נגן ההודעה הקולית")
                                 playButtonForTap.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                                 handler.postDelayed({
@@ -1257,8 +1280,11 @@ class WaSendAccessibilityService : AccessibilityService() {
                                     // playing in the background after this
                                     // experiment.
                                     rootInActiveWindow?.let { freshRoot ->
-                                        findBottommostMatchingDescription(freshRoot, VOICE_NOTE_PLAY_BUTTON_REGEX)
-                                            ?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                        val stopButton = findBottommostMatchingDescription(freshRoot, VOICE_NOTE_PLAY_BUTTON_REGEX)
+                                        if (stopButton != null) {
+                                            logBubbleConsistencyCheck(stopButton, "ניסוי-C stop-tap")
+                                            stopButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                        }
                                     }
                                     voiceNotePlaybackTapCompleted = true
                                 }, 1200L)
@@ -1371,6 +1397,32 @@ class WaSendAccessibilityService : AccessibilityService() {
                                                         }, 900L)
                                                     } else {
                                                         EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-G] לא נמצא כפתור אישור שמירה")
+                                                        // FIX (31.8.2026): the exact-match regex
+                                                        // (^save$/^שמור$) found nothing even over
+                                                        // the full tree, so the real button's label
+                                                        // is unknown - surface every clickable node
+                                                        // whose text/description loosely mentions
+                                                        // save/confirm/done, bottom-most first, so
+                                                        // the real label is visible in ONE log line
+                                                        // instead of scanning the whole dump by hand.
+                                                        safRoot?.let { r ->
+                                                            val looseRegex = Regex("""(save|שמור|שמירה|done|בוצע|אישור|confirm|ok)""", RegexOption.IGNORE_CASE)
+                                                            val candidates = mutableListOf<AccessibilityNodeInfo>()
+                                                            fun collect(n: AccessibilityNodeInfo) {
+                                                                val t = n.text?.toString() ?: n.contentDescription?.toString()
+                                                                if (n.isClickable && t != null && looseRegex.containsMatchIn(t)) candidates.add(n)
+                                                                for (i in 0 until n.childCount) n.getChild(i)?.let { collect(it) }
+                                                            }
+                                                            collect(r)
+                                                            if (candidates.isEmpty()) {
+                                                                EventLog.log("A11y-MediaDownload: 🔎 [ניסוי-G] אין אף node לחיץ עם טקסט דמוי-שמירה בכל העץ")
+                                                            } else {
+                                                                candidates.forEach { c ->
+                                                                    val r2 = Rect(); c.getBoundsInScreen(r2)
+                                                                    EventLog.log("A11y-MediaDownload: 🔎 [ניסוי-G] מועמד: text='${c.text}' desc='${c.contentDescription}' bounds=$r2")
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                                 handler.postDelayed({ trySafDump(2) }, 1800L)
@@ -1971,6 +2023,31 @@ class WaSendAccessibilityService : AccessibilityService() {
      * (ImageButton, per the log this was built from - but kept
      * class-agnostic here in case that varies).
      */
+    /**
+     * FIX (31.8.2026, wrong-bubble theory): compares a freshly-found
+     * candidate bubble/button's bounds against originalVoiceNoteButtonBounds
+     * (the bubble the long-press first targeted) and logs plainly whether
+     * this step is still acting on the SAME message or appears to have
+     * drifted to a different one - a >120px vertical shift is treated as
+     * a likely different bubble (small shifts can happen from the
+     * selection toolbar changing header height for the SAME message).
+     */
+    private fun logBubbleConsistencyCheck(candidate: AccessibilityNodeInfo, stepLabel: String) {
+        val r = Rect()
+        candidate.getBoundsInScreen(r)
+        val original = originalVoiceNoteButtonBounds
+        if (original == null) {
+            EventLog.log("A11y-MediaDownload: 🎯 [$stepLabel] כפתור בהודעה קולית נמצא ב-$r (אין מיקום מקורי שמור להשוואה)")
+            return
+        }
+        val verticalShift = kotlin.math.abs(r.top - original.top)
+        if (verticalShift > 120) {
+            EventLog.log("A11y-MediaDownload: 🚨 [$stepLabel] אזהרה: הכפתור שנמצא עכשיו ב-$r רחוק מהמיקום המקורי $original (הפרש ${verticalShift}px) - ייתכן שזו הודעה קולית אחרת/קודמת, לא זו שכוונה במקור!")
+        } else {
+            EventLog.log("A11y-MediaDownload: 🎯 [$stepLabel] כפתור נמצא ב-$r - תואם למיקום המקורי $original (הפרש ${verticalShift}px)")
+        }
+    }
+
     private fun findBottommostMatchingDescription(root: AccessibilityNodeInfo, regex: Regex): AccessibilityNodeInfo? {
         var best: AccessibilityNodeInfo? = null
         var bestBottom = -1
@@ -2050,8 +2127,20 @@ class WaSendAccessibilityService : AccessibilityService() {
                 EventLog.log("A11y-MediaDownload: 🌳   $count× $cls")
             }
 
-            EventLog.log("A11y-MediaDownload: 🌳 אבחון מלא - ${clickables.size} nodes לחיצים סה\"כ, עד 15 (מסודר לפי מיקום אנכי):")
-            clickables.sortedBy { it.rect.top }.take(15).forEach { c ->
+            // FIX (31.8.2026, method G confirm-button blind spot): the
+            // SAF "Save as…" screen dump at 11:10:01 showed 28 total
+            // clickable nodes but this list was hard-capped at 15,
+            // sorted ASCENDING by vertical position - meaning exactly
+            // the bottom-of-screen rows got silently cut, which is
+            // precisely where a Save/Cancel button bar normally lives.
+            // The regex search itself (findClickableMatchingRegex)
+            // already walks the FULL tree and still found nothing, so
+            // the real confirm button's actual text/description is
+            // still unknown - raising the cap here (instead of
+            // guessing at a new regex blind) is what will actually
+            // reveal it in the next on-device log.
+            EventLog.log("A11y-MediaDownload: 🌳 אבחון מלא - ${clickables.size} nodes לחיצים סה\"כ, עד 40 (מסודר לפי מיקום אנכי):")
+            clickables.sortedBy { it.rect.top }.take(40).forEach { c ->
                 // FIX (23.8.2026): on-device dump of an OPEN menu showed
                 // 8 clickable rows all logged as text='' desc='' - each
                 // row is a plain clickable container wrapping a SEPARATE
