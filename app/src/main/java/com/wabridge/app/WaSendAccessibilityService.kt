@@ -1242,7 +1242,29 @@ class WaSendAccessibilityService : AccessibilityService() {
                                     // Diagnostic only - never select a
                                     // contact/complete the forward. Back out.
                                     performGlobalAction(GLOBAL_ACTION_BACK)
-                                    voiceNoteForwardTapCompleted = true
+                                    // FIX (31.8.2026, wrong-screen theory):
+                                    // the 12:26 on-device log proved ONE
+                                    // BACK only pops the Forward picker's
+                                    // inner screen - the dump right after
+                                    // still showed the contact/chat LIST
+                                    // screen (קבוצה חדשה/חיפוש/צ'אטים
+                                    // אחרונים), not the target chat. That
+                                    // caused Method C to search for the
+                                    // play button on the WRONG screen and
+                                    // silently fail. Send a SECOND back
+                                    // 400ms later, then dump once more so
+                                    // the log directly confirms whether
+                                    // we're truly back on the target chat
+                                    // (package/title now logged by
+                                    // dumpFullNodeTree) before Method C runs.
+                                    handler.postDelayed({
+                                        performGlobalAction(GLOBAL_ACTION_BACK)
+                                        handler.postDelayed({
+                                            EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-B] אבחון אחרי BACK שני - מוודא חזרה לצ'אט המקורי:")
+                                            rootInActiveWindow?.let { dumpFullNodeTree(it) }
+                                            voiceNoteForwardTapCompleted = true
+                                        }, 400L)
+                                    }, 400L)
                                 }, 700L)
                             } else {
                                 EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-B] לא נמצא \"העברה\" בתפריט הבחירה של ההודעה הקולית")
@@ -2091,6 +2113,19 @@ class WaSendAccessibilityService : AccessibilityService() {
      */
     private fun dumpFullNodeTree(root: AccessibilityNodeInfo) {
         try {
+            // FIX (31.8.2026, wrong-screen theory): the 12:26 log showed
+            // Method C failing to find the play button right after Method
+            // B's (Forward) single BACK press - the dump at that point
+            // still showed "קבוצה חדשה/חיפוש/צ'אטים אחרונים" (a contact/
+            // chat LIST screen), meaning one BACK only popped one level of
+            // the multi-screen Forward picker, not the whole thing - so
+            // every method AFTER that ran blind on the wrong screen
+            // entirely, not on the target chat. Logging the window's
+            // package + title on every dump makes this visible directly
+            // instead of having to infer it from node contents each time.
+            val pkg = root.packageName?.toString() ?: "?"
+            val windowTitle = try { root.window?.title?.toString() } catch (e: Exception) { null } ?: "?"
+            EventLog.log("A11y-MediaDownload: 🪟 חלון נוכחי - package='$pkg' title='$windowTitle'")
             val classCounts = HashMap<String, Int>()
             data class ClickableInfo(
                 val node: AccessibilityNodeInfo, val cls: String, val text: String, val desc: String,
