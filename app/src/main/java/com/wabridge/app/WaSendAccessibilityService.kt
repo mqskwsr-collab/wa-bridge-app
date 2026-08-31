@@ -318,6 +318,10 @@ class WaSendAccessibilityService : AccessibilityService() {
     // the SECOND. This retries with findLastClickableMatchingRegex to
     // test that theory directly.
     private var hasTriedVoiceNoteLastMoreOptionsTap = false
+    // FIX (31.8.2026, lost-selection theory): gates the ONE re-select
+    // (re-long-press) attempt Method E makes if it finds the selection
+    // toolbar already gone by the time it runs (see call site).
+    private var hasTriedVoiceNoteReselectForMoreOptions = false
     // FIX (27.8.2026, race-condition bug): the 27.8 21:37 on-device log
     // showed the "More options" tap firing BEFORE the long-press
     // gesture's own onCompleted callback log line - SEARCH_INTERVAL_MS
@@ -501,6 +505,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             hasTriedVoiceNotePlaybackTap = false
             voiceNotePlaybackTapCompleted = false
             hasTriedVoiceNoteLastMoreOptionsTap = false
+            hasTriedVoiceNoteReselectForMoreOptions = false
             voiceNoteLongPressCompleted = false
             lastMediaDownloadDumpTime = 0L
             dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
@@ -1329,13 +1334,43 @@ class WaSendAccessibilityService : AccessibilityService() {
                         } else if (job.mediaType == MediaClassifier.MediaType.VOICE_NOTE &&
                             voiceNotePlaybackTapCompleted && !hasTriedVoiceNoteLastMoreOptionsTap
                         ) {
-                            // FIX (30.8.2026, duplicate-node theory):
-                            // METHOD E - re-tries "More options" but takes
-                            // the LAST match in tree order instead of the
-                            // first (findLastClickableMatchingRegex), on
-                            // the theory that the stale/underlying header
-                            // button (not the current selection toolbar's)
-                            // was being hit every previous time.
+                            // FIX (31.8.2026, lost-selection theory): the
+                            // 14:26 on-device log proved Method C's play/
+                            // pause tap on the bubble DESELECTS the
+                            // message and closes the selection toolbar -
+                            // so by the time this runs,
+                            // findLastClickableMatchingRegex(MORE_OPTIONS)
+                            // only has ONE match left (the chat header's),
+                            // same wrong menu Method E was originally
+                            // built to avoid. The Forward button only
+                            // exists while a message is selected, so it's
+                            // a reliable signal the toolbar is gone - if
+                            // so, re-select the message (long-press again
+                            // on its remembered bounds) exactly once
+                            // before searching for "More options" at all.
+                            val selectionToolbarPresent = findClickableMatchingRegex(root, FORWARD_DESC_REGEX) != null
+                            if (!selectionToolbarPresent && !hasTriedVoiceNoteReselectForMoreOptions && originalVoiceNoteButtonBounds != null) {
+                                hasTriedVoiceNoteReselectForMoreOptions = true
+                                val b = originalVoiceNoteButtonBounds!!
+                                EventLog.log("A11y-MediaDownload: 🔁 [ניסוי-E] בחירת ההודעה אבדה (ככל הנראה עקב הלחיצה על הנגן בשיטה C) - עושה לחיצה ארוכה חוזרת על $b לפני חיפוש More options")
+                                val reselectPath = Path().apply { moveTo(b.centerX().toFloat(), b.centerY().toFloat()) }
+                                val reselectGesture = GestureDescription.Builder()
+                                    .addStroke(GestureDescription.StrokeDescription(reselectPath, 0, 700))
+                                    .build()
+                                dispatchGesture(reselectGesture, object : GestureResultCallback() {
+                                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                                        EventLog.log("A11y-MediaDownload: 🔁 [ניסוי-E] אבחון אחרי בחירה מחדש של ההודעה:")
+                                        rootInActiveWindow?.let { dumpFullNodeTree(it) }
+                                        // hasTriedVoiceNoteLastMoreOptionsTap stays false
+                                        // on purpose so the NEXT poll tick retries the
+                                        // More-options search below, now that the
+                                        // toolbar should be back.
+                                    }
+                                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                                        EventLog.log("A11y-MediaDownload: 🔁 [ניסוי-E] הלחיצה הארוכה החוזרת בוטלה ע\"י המערכת")
+                                    }
+                                }, null)
+                            } else {
                             hasTriedVoiceNoteLastMoreOptionsTap = true
                             val lastMoreOptions = findLastClickableMatchingRegex(root, MORE_OPTIONS_DESC_REGEX)
                             if (lastMoreOptions != null) {
@@ -1473,6 +1508,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                             } else {
                                 EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-E] לא נמצא \"More options\" (התאמה אחרונה)")
                             }
+                            } // closes the "else" added by the 31.8.2026 reselect-guard fix
                         }
                         handler.postDelayed(this, SEARCH_INTERVAL_MS)
                     }
