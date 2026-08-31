@@ -1317,10 +1317,24 @@ class WaSendAccessibilityService : AccessibilityService() {
                                             if (saveAsItem != null) {
                                                 EventLog.log("A11y-MediaDownload: 💾 [ניסוי-G] נמצא \"Save as…\" - לוחץ")
                                                 saveAsItem.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                                                handler.postDelayed({
-                                                    EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-G] אבחון מסך שמירה (SAF):")
+                                                // FIX (31.8.2026, method G timing): the 31.8 00:59 log
+                                                // showed the SAF picker dump come back completely empty
+                                                // right before "confirm button not found" - almost
+                                                // certainly rootInActiveWindow was still null/mid-
+                                                // transition at 900ms, since launching a full separate
+                                                // system Activity (the Files picker) is heavier than the
+                                                // in-app menus every earlier step dealt with. Give it
+                                                // longer, and if it's STILL not ready, retry once more
+                                                // instead of silently giving up.
+                                                fun trySafDump(attemptsLeft: Int) {
                                                     val safRoot = rootInActiveWindow
-                                                    if (safRoot != null) dumpFullNodeTree(safRoot)
+                                                    if (safRoot == null && attemptsLeft > 0) {
+                                                        EventLog.log("A11y-MediaDownload: ⏳ [ניסוי-G] מסך השמירה עדיין לא מוכן - מנסה שוב")
+                                                        handler.postDelayed({ trySafDump(attemptsLeft - 1) }, 1000L)
+                                                        return
+                                                    }
+                                                    EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-G] אבחון מסך שמירה (SAF):")
+                                                    if (safRoot != null) dumpFullNodeTree(safRoot) else EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-G] rootInActiveWindow ריק גם אחרי כל הניסיונות")
                                                     val confirmSaveButton = safRoot?.let { findClickableMatchingRegex(it, SAVE_CONFIRM_BUTTON_REGEX) }
                                                     if (confirmSaveButton != null) {
                                                         EventLog.log("A11y-MediaDownload: ✅ [ניסוי-G] נמצא כפתור אישור שמירה - לוחץ (מקבל מיקום/שם ברירת מחדל)")
@@ -1357,9 +1371,9 @@ class WaSendAccessibilityService : AccessibilityService() {
                                                         }, 900L)
                                                     } else {
                                                         EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-G] לא נמצא כפתור אישור שמירה")
-                                                        performGlobalAction(GLOBAL_ACTION_BACK)
                                                     }
-                                                }, 900L)
+                                                }
+                                                handler.postDelayed({ trySafDump(2) }, 1800L)
                                             } else {
                                                 EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-G] לא נמצא \"Save as…\" בתפריט השיתוף")
                                                 performGlobalAction(GLOBAL_ACTION_BACK)
