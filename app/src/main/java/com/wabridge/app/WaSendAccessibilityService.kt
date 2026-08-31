@@ -148,6 +148,18 @@ class WaSendAccessibilityService : AccessibilityService() {
         // "play voice message" button - see the long-press experiment
         // this feeds, in stage 0's bubble==null branch.
         private val VOICE_NOTE_PLAY_BUTTON_REGEX = Regex("""(השמעת ההודעה הקולית|play voice (message|note))""", RegexOption.IGNORE_CASE)
+        // FIX (31.8.2026, "jumps to previous recording" root cause):
+        // the 14:10:55 on-device log proved it - once Method C taps play,
+        // WhatsApp relabels THAT SAME button's content-description from
+        // "השמעת ההודעה הקולית" (play) to "השהיית ההודעה הקולית" (pause).
+        // The stop-tap step was re-searching with the PLAY-only regex,
+        // which no longer matched the now-playing (now "pause"-labeled)
+        // bubble - so "bottommost match" silently landed on the NEXT
+        // bubble up (128px away) that still said "play", i.e. a
+        // different, earlier voice note. This regex covers BOTH labels
+        // so the stop-tap search still finds the bottommost bubble
+        // regardless of which state it's currently displaying.
+        private val VOICE_NOTE_PLAYBACK_TOGGLE_REGEX = Regex("""(השמעת ההודעה הקולית|השהיית ההודעה הקולית|play voice (message|note)|pause voice (message|note))""", RegexOption.IGNORE_CASE)
         // FIX (21.8.2026): the FULL on-device tree dump (see FIX46)
         // revealed the real culprit for why imgCount stayed flat at 2
         // the whole timeout - the photo bubble is classed as
@@ -1302,7 +1314,7 @@ class WaSendAccessibilityService : AccessibilityService() {
                                     // playing in the background after this
                                     // experiment.
                                     rootInActiveWindow?.let { freshRoot ->
-                                        val stopButton = findBottommostMatchingDescription(freshRoot, VOICE_NOTE_PLAY_BUTTON_REGEX)
+                                        val stopButton = findBottommostMatchingDescription(freshRoot, VOICE_NOTE_PLAYBACK_TOGGLE_REGEX)
                                         if (stopButton != null) {
                                             logBubbleConsistencyCheck(stopButton, "ניסוי-C stop-tap")
                                             stopButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
