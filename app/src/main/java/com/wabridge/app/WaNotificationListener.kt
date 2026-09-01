@@ -165,6 +165,18 @@ class WaNotificationListener : NotificationListenerService() {
         // under Apps Script's doPost payload ceiling even after base64's
         // ~37% size inflation.
         private const val MEDIA_HARD_DROP_CAP_BYTES = 30L * 1024 * 1024 // 30MB
+
+        // FIX (02.9.2026, chunked upload for files over 30MB): a file
+        // over MEDIA_HARD_DROP_CAP_BYTES is no longer just dropped - up
+        // to this absolute ceiling it's instead sent to Code.gs's new
+        // chunked-upload endpoint (startChunkUpload/uploadChunk
+        // actions) as a series of small requests, avoiding the single-
+        // giant-base64-POST risk the 30MB cap was originally chosen to
+        // avoid. Kept generous but still bounded, so a truly huge file
+        // (or a corrupt/never-ending read) can't upload indefinitely in
+        // the background. MUST match CHUNK_UPLOAD_ABSOLUTE_MAX_BYTES in
+        // Code.gs.
+        private const val CHUNK_UPLOAD_ABSOLUTE_MAX_BYTES = 150L * 1024 * 1024 // 150MB
     }
 
     private val executor = Executors.newSingleThreadExecutor()
@@ -440,12 +452,26 @@ class WaNotificationListener : NotificationListenerService() {
             // every attachment's base64) is written directly to the HTTP
             // connection's OutputStreamWriter below, streamed one small
             // fixed-size chunk at a time via writeStreamedBase64.
-            val attachResult = attachMediaIfAny(text, postTimeMs, target, contentIntent)
+            val attachResult = attachMediaIfAny(webAppUrl, title, text, phone, isGroup, postTimeMs, target, contentIntent)
             if (attachResult.skipEntireSend) {
                 EventLog.log("Listener: 🚫 השליחה כולה בוטלת - ראה שורת הלוג הקודמת")
                 return
             }
             val attachments = attachResult.attachments
+            // FIX (02.9.2026, silent-drop-over-30MB bug): if a file was
+            // over MEDIA_HARD_DROP_CAP_BYTES, the email used to go out
+            // with no trace that a file ever existed. Now append a
+            // visible note to the email body: either that the file is
+            // being uploaded separately in the background (chunked
+            // upload path), or - only for the rare file over even the
+            // chunked-upload ceiling - that it couldn't be sent at all.
+            // droppedTooLargeNote's own text (set in attachMediaIfAny)
+            // already distinguishes the two cases.
+            val effectiveText = if (attachResult.droppedTooLargeNote != null) {
+                text + "\n\n⚠️ קובץ מדיה: ${attachResult.droppedTooLargeNote}"
+            } else {
+                text
+            }
 
             val url = URL(webAppUrl)
             val conn = (url.openConnection() as HttpURLConnection).apply {
@@ -464,7 +490,7 @@ class WaNotificationListener : NotificationListenerService() {
                 writer.write("{\"title\":")
                 writer.write(JSONObject.quote(title))
                 writer.write(",\"text\":")
-                writer.write(JSONObject.quote(text))
+                writer.write(JSONObject.quote(effectiveText))
                 if (phone != null) {
                     writer.write(",\"phone\":")
                     writer.write(JSONObject.quote(phone))
@@ -559,9 +585,21 @@ class WaNotificationListener : NotificationListenerService() {
      * email, since it's real information that something arrived and
      * couldn't be fetched. Only the former is suppressed entirely.
      */
-    private data class AttachResult(val attachments: List<PendingAttachment>, val skipEntireSend: Boolean = false)
+    // FIX (02.9.2026, silent-drop-over-30MB bug): a file over
+    // MEDIA_HARD_DROP_CAP_BYTES used to be filtered out with only an
+    // EventLog line on-device - the email itself still went out (title+
+    // text only, e.g. a caption like "📄 קיבלת?"), so the recipient had
+    // zero way to know a media file had even existed, let alone that it
+    // was too large to deliver. droppedTooLargeNote carries a short
+    // human-readable summary (name+size) of the first such file so
+    // postToAppsScript can append a visible warning to the email body.
+    private data class AttachResult(
+        val attachments: List<PendingAttachment>,
+        val skipEntireSend: Boolean = false,
+        val droppedTooLargeNote: String? = null
+    )
 
-    private fun attachMediaIfAny(text: String, postTimeMs: Long, target: String, contentIntent: PendingIntent?): AttachResult {
+    private fun attachMediaIfAny(webAppUrl: String, title: String, text: String, phone: String?, isGroup: Boolean?, postTimeMs: Long, target: String, contentIntent: PendingIntent?): AttachResult {
         try {
             val mediaType = MediaClassifier.classify(text)
             if (mediaType == MediaClassifier.MediaType.NONE) return AttachResult(emptyList())
@@ -658,6 +696,7 @@ class WaNotificationListener : NotificationListenerService() {
             // MEDIA_SIZE_CAP_BYTES and MEDIA_HARD_DROP_CAP_BYTES are kept
             // here - they're routed to Drive-link instead of a direct
             // attachment further down, not dropped.
+            var droppedTooLargeNote: String? = null
             val usable = found.filter { fm ->
                 val path = fm.file.absolutePath
                 when {
@@ -667,8 +706,33 @@ class WaNotificationListener : NotificationListenerService() {
                     }
                     fm.file.length() > MEDIA_HARD_DROP_CAP_BYTES -> {
                         val mb = fm.file.length() / (1024 * 1024)
-                        Log.w(TAG, "Media file too large even for a Drive link: ${fm.file.name} (${mb}MB)")
-                        EventLog.log("Listener: ⚠️ קובץ המדיה גדול מדי אפילו לקישור Drive (${mb}MB, תקרה: ${MEDIA_HARD_DROP_CAP_BYTES / (1024 * 1024)}MB) - מדלג")
+                        if (fm.file.length() <= CHUNK_UPLOAD_ABSOLUTE_MAX_BYTES) {
+                            // FIX (02.9.2026): instead of dropping this
+                            // file, hand it to ChunkedMediaUploader,
+                            // which sends it to Code.gs in small pieces
+                            // (a separate follow-up email with a Drive
+                            // link arrives once that finishes - this
+                            // main email still goes out normally, just
+                            // with a note that more is coming).
+                            Log.i(TAG, "Media file over ${MEDIA_HARD_DROP_CAP_BYTES / (1024*1024)}MB - routing to chunked upload: ${fm.file.name} (${mb}MB)")
+                            EventLog.log("Listener: 📦 קובץ מדיה גדול (${mb}MB) - יועלה בחלקים ברקע, מייל נפרד יישלח בסיום")
+                            ChunkedMediaUploader.uploadInBackground(webAppUrl, fm.file, fm.mimeType, title, text, phone, isGroup)
+                            if (droppedTooLargeNote == null) {
+                                droppedTooLargeNote = "${fm.file.name} (${mb}MB) - מועלה בחלקים, יגיע במייל נפרד"
+                            }
+                        } else {
+                            Log.w(TAG, "Media file too large even for chunked upload: ${fm.file.name} (${mb}MB)")
+                            EventLog.log("Listener: ⚠️ קובץ המדיה גדול מדי אפילו להעלאה בחלקים (${mb}MB, תקרה: ${CHUNK_UPLOAD_ABSOLUTE_MAX_BYTES / (1024 * 1024)}MB) - מדלג")
+                            // FIX (02.9.2026): remember this so the caller can
+                            // put a visible warning in the email itself,
+                            // instead of the drop being on-device-log-only.
+                            // Only the first dropped file's info is kept
+                            // (multiple oversized files in one album is rare
+                            // and a single clear warning is enough).
+                            if (droppedTooLargeNote == null) {
+                                droppedTooLargeNote = "${fm.file.name} (${mb}MB) - גדול מדי לשליחה (מעל ${CHUNK_UPLOAD_ABSOLUTE_MAX_BYTES / (1024 * 1024)}MB) - לא נשלח"
+                            }
+                        }
                         false
                     }
                     else -> true
@@ -691,7 +755,11 @@ class WaNotificationListener : NotificationListenerService() {
                     EventLog.log("Listener: ⏭️ מדלג על שליחה כולה - כל ${found.size} הקבצים שנמצאו כבר נשלחו לאחרונה (התראה חוזרת/מתעדכנת עבור אותו אלבום)")
                     return AttachResult(emptyList(), skipEntireSend = true)
                 }
-                return AttachResult(emptyList())
+                // FIX (02.9.2026): still surface the too-large note here -
+                // this is exactly the "every file was too big" case (e.g.
+                // a single 37MB video), which previously fell through to
+                // a plain-text-only email with no explanation.
+                return AttachResult(emptyList(), droppedTooLargeNote = droppedTooLargeNote)
             }
 
             if (expectedCount > usable.size) {
@@ -714,7 +782,7 @@ class WaNotificationListener : NotificationListenerService() {
                 EventLog.log("Listener: 📎 מצרף קובץ מדיה: ${fm.file.name} ($sizeLabel)")
                 PendingAttachment(fm.file, fm.mimeType, tooLargeToAttachDirectly)
             }
-            return AttachResult(attachments)
+            return AttachResult(attachments, droppedTooLargeNote = droppedTooLargeNote)
         } catch (e: Exception) {
             // Deliberately swallow - see doc comment above. A media
             // lookup/read failure must never prevent the plain-text
