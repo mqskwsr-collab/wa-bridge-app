@@ -265,6 +265,13 @@ class WaSendAccessibilityService : AccessibilityService() {
         // ("SAVE", "שמור", sometimes just a checkmark icon with this
         // description).
         private val SAVE_CONFIRM_BUTTON_REGEX = Regex("""^(save|שמור)$""", RegexOption.IGNORE_CASE)
+        // FIX (01.9.2026, Amaze SAF confirm button): resource-id fallback for
+        // pickers (e.g. Amaze) whose confirm FAB has no text/description at
+        // all - only usable now that flagReportViewIds is set. Broad on
+        // purpose (varies by OEM/file-manager); the bottom-right-quadrant
+        // positional fallback below still catches the case where even the
+        // id itself is generic/unhelpful.
+        private val SAVE_CONFIRM_ID_REGEX = Regex("""(save|confirm|ok|done|fab|action_button)""", RegexOption.IGNORE_CASE)
         // FIX (23.8.2026, full-album swipe): label of the container node
         // that holds the currently-displayed full-screen image (seen in
         // the on-device dump as a ViewGroup with label='הגדלת התמונה'
@@ -1667,7 +1674,14 @@ class WaSendAccessibilityService : AccessibilityService() {
                                                     }
                                                     EventLog.log("A11y-MediaDownload: 🌳 [ניסוי-G] אבחון מסך שמירה (SAF):")
                                                     if (safRoot != null) dumpFullNodeTree(safRoot) else EventLog.log("A11y-MediaDownload: ⚠️ [ניסוי-G] rootInActiveWindow ריק גם אחרי כל הניסיונות")
+                                                    // FIX (01.9.2026, Amaze SAF confirm button): text-based
+                                                    // search first (works for stock/most SAF pickers), then
+                                                    // resource-id (now populated thanks to flagReportViewIds),
+                                                    // then the bottom-right-quadrant positional guess as a
+                                                    // last resort - see each helper's doc comment for why.
                                                     val confirmSaveButton = safRoot?.let { findClickableMatchingRegex(it, SAVE_CONFIRM_BUTTON_REGEX) }
+                                                        ?: safRoot?.let { findClickableMatchingViewId(it, SAVE_CONFIRM_ID_REGEX) }
+                                                        ?: safRoot?.let { findUnlabeledButtonInBottomRightQuadrant(it) }
                                                     if (confirmSaveButton != null) {
                                                         EventLog.log("A11y-MediaDownload: ✅ [ניסוי-G] נמצא כפתור אישור שמירה - לוחץ (מקבל מיקום/שם ברירת מחדל)")
                                                         confirmSaveButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -2563,6 +2577,85 @@ class WaSendAccessibilityService : AccessibilityService() {
             if (found != null) return found
         }
         return null
+    }
+
+    /**
+     * FIX (01.9.2026, Amaze SAF confirm button): findClickableMatchingRegex
+     * only ever matches on text/contentDescription - useless against a
+     * third-party file manager's icon-only confirm FAB (text='' desc='',
+     * confirmed on-device: Amaze's save/confirm FAB at
+     * Rect(1436, 728 - 1588, 896), zero text or description on it or any
+     * ancestor). Now that accessibility_service_config.xml declares
+     * flagReportViewIds, node.viewIdResourceName should actually be
+     * populated (it silently returns "" without that flag) - search by
+     * resource-id first, since that's a real, stable identifier when
+     * available (e.g. some OEM file managers use ids like
+     * "action_button"/"fab"/"btn_ok" even with no visible label).
+     */
+    private fun findClickableMatchingViewId(node: AccessibilityNodeInfo, idRegex: Regex): AccessibilityNodeInfo? {
+        val id = node.viewIdResourceName
+        if (id != null && idRegex.containsMatchIn(id)) {
+            var clickable: AccessibilityNodeInfo? = node
+            while (clickable != null && !clickable.isClickable) clickable = clickable.parent
+            if (clickable != null) return clickable
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findClickableMatchingViewId(child, idRegex)
+            if (found != null) return found
+        }
+        return null
+    }
+
+    /**
+     * FIX (01.9.2026, Amaze SAF confirm button): last-resort fallback when
+     * neither text/description nor resource-id search finds anything -
+     * this is exactly the situation the 01.9 21:35 on-device log hit
+     * ("אין אף node לחיץ עם טקסט דמוי-שמירה בכל העץ"). A save/confirm FAB
+     * pinned to the bottom-right corner is an almost-universal Android
+     * pattern (confirmed visually on-device: the pink download-arrow FAB
+     * in Amaze). Restricted to clickable nodes with NO text/description
+     * (so this never accidentally overrides a real, findable button) whose
+     * center falls in the bottom-right quadrant of the screen, picking the
+     * one closest to the bottom-right corner if several qualify.
+     */
+    private fun findUnlabeledButtonInBottomRightQuadrant(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val screenRect = Rect()
+        root.getBoundsInScreen(screenRect)
+        if (screenRect.width() <= 0 || screenRect.height() <= 0) return null
+        val midX = screenRect.left + screenRect.width() / 2
+        val midY = screenRect.top + screenRect.height() / 2
+
+        var best: AccessibilityNodeInfo? = null
+        var bestScore = -1
+
+        fun visit(node: AccessibilityNodeInfo) {
+            if (node.isClickable) {
+                val text = node.text?.toString().orEmpty()
+                val desc = node.contentDescription?.toString().orEmpty()
+                if (text.isBlank() && desc.isBlank()) {
+                    val r = Rect()
+                    node.getBoundsInScreen(r)
+                    val cx = r.centerX()
+                    val cy = r.centerY()
+                    if (cx > midX && cy > midY) {
+                        // Score by how far into the bottom-right corner it sits.
+                        val score = cx + cy
+                        if (score > bestScore) {
+                            bestScore = score
+                            best = node
+                        }
+                    }
+                }
+            }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                visit(child)
+            }
+        }
+
+        visit(root)
+        return best
     }
 
     private fun findClickableMatchingRegex(node: AccessibilityNodeInfo, regex: Regex): AccessibilityNodeInfo? {
