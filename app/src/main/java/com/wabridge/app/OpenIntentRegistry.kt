@@ -26,4 +26,9 @@ object OpenIntentRegistry {
 
     @Synchronized
     fun get(target: String): PendingIntent? = map[target]
+
+    @Synchronized
+    fun remove(target: String) {
+        map.remove(target)
+    }
 }

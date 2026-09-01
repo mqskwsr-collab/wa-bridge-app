@@ -399,6 +399,10 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var searchQueryTypedAt = 0L
     private var searchResultNotFoundLogged = false
 
+    // Set once per job, right before the first type/send attempt - see
+    // the SAFETY GUARD block in searchRunnable for what this gates.
+    private var titleVerified = false
+
     // --- Group-link learning state (separate from the send flow above) ---
     private var learning = false
     private var learnStartTime = 0L
@@ -480,6 +484,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             typedSearchQuery = false
             searchQueryTypedAt = 0L
             searchResultNotFoundLogged = false
+            titleVerified = false
             lastDiagnosticDumpTime = 0L
             lastSendDumpTime = 0L
             handler.post(searchRunnable)
@@ -615,10 +620,25 @@ class WaSendAccessibilityService : AccessibilityService() {
                 // intermediate landing screen (a preview with a
                 // "הודעה"/"Message" button, not the conversation itself).
                 // Try clicking that once, then keep searching for entry.
-                // (For a searchByName job there is no invite link at all,
-                // so this will simply never find anything - harmless, it
-                // just falls through to the search-by-name block below.)
-                if (!clickedIntermediateScreen) {
+                //
+                // FIX (01.9.2026, searchByName-hijack bug): this check
+                // is only safe in the narrow, controlled context it was
+                // built for - the invite-link preview screen, which has
+                // essentially nothing else clickable on it. A
+                // searchByName job (see below) never opens that screen
+                // at all - WhatsApp just lands on the ordinary home/
+                // chat-list screen, which is full of clickable rows
+                // whose own text (a contact's last-message preview, a
+                // "New chat" FAB, etc.) can easily contain the same
+                // substring and get clicked instead, opening a
+                // completely unrelated chat and sending the message
+                // there. Confirmed from a real device log on
+                // 01.9.2026: this exact block fired first and opened
+                // the wrong chat before the search-icon step below ever
+                // got a chance to run. So: never run this for a
+                // searchByName job - go straight to the search-icon
+                // handling instead.
+                if (!job.searchByName && !clickedIntermediateScreen) {
                     val intermediateBtn = findClickableByText(root, listOf("הודעה", "Message", "message"))
                     if (intermediateBtn != null) {
                         Log.i(TAG, "Found intermediate landing screen button - clicking it")
@@ -748,6 +768,40 @@ class WaSendAccessibilityService : AccessibilityService() {
             // Copy to a non-null local val so Kotlin's smart-cast works
             // correctly inside the nested closure below.
             val entryNodeFinal: AccessibilityNodeInfo = entryNode!!
+
+            // SAFETY GUARD (01.9.2026, wrong-chat-send prevention): before
+            // typing/sending ANYTHING, confirm the screen actually
+            // belongs to job.target. This matters most for searchByName
+            // and captured-contentIntent jobs (no invite link to
+            // guarantee correctness), but it costs nothing to check on
+            // deep-link jobs too, so it runs unconditionally for every
+            // job. Looks for the target's exact name as a text/
+            // content-description node near the TOP of the screen only
+            // (the toolbar/header zone - roughly the top 18% of screen
+            // height) rather than anywhere on screen, specifically so a
+            // message BODY that happens to mention the target's name in
+            // some unrelated chat can't produce a false "confirmed"
+            // match. Checked once per job (titleVerified flag) - if it
+            // fails, abort completely rather than typing into (and
+            // possibly sending to) the wrong conversation; the row stays
+            // pending and PollingService will retry next cycle.
+            if (!titleVerified) {
+                titleVerified = true
+                val screenHeight = resources.displayMetrics.heightPixels
+                val toolbarZoneBottomPx = (screenHeight * 0.18).toInt()
+                val titleOk = findTextMatchInZone(root, listOf(job.target), toolbarZoneBottomPx)
+                    || (windows?.any { w -> w.root?.let { findTextMatchInZone(it, listOf(job.target), toolbarZoneBottomPx) } == true } == true)
+                if (!titleOk) {
+                    Log.w(TAG, "SAFETY ABORT: could not confirm '${job.target}' in the screen's toolbar area - refusing to type/send")
+                    val texts = mutableListOf<String>()
+                    collectTexts(root, texts, maxCount = 12)
+                    EventLog.log("A11y: 🛑 עצירת בטיחות - לא הצלחתי לאמת שהמסך הפתוח שייך ל-'${job.target}'. לא מקליד ולא שולח כלום! מוצג כרגע: ${texts.joinToString(" | ").ifBlank { "(אין טקסטים)" }}")
+                    searching = false
+                    SendCoordinator.reportResult(SendCoordinator.Result.FAILED_WRONG_CHAT)
+                    return
+                }
+                EventLog.log("A11y: ✅ אומתה זהות הצ'אט הפתוח מול '${job.target}' - ממשיך לשליחה")
+            }
 
             Log.i(TAG, "Found entry node - typing text (send button appears after typing)")
             EventLog.log("A11y: נמצא entry, מקליד טקסט...")
@@ -2554,6 +2608,44 @@ class WaSendAccessibilityService : AccessibilityService() {
             n = n.parent
         }
         return null
+    }
+
+    /**
+     * SAFETY GUARD helper (01.9.2026): same equals-or-startsWith
+     * comparison as findTextMatch (bidi-stripped, case-insensitive), but
+     * restricted to nodes positioned within the top zoneBottomPx pixels
+     * of the screen - i.e. the toolbar/header area, not the scrollable
+     * message list below it. This is deliberately narrower than
+     * findTextMatch: the whole point is telling apart "this IS the
+     * conversation's own title" from "the target's name happens to
+     * appear somewhere in a message body", which a screen-wide search
+     * cannot distinguish. Also accepts the reverse startsWith direction
+     * (the on-screen text is a truncated PREFIX of the full target name,
+     * e.g. an emoji-heavy group name cut short with an ellipsis by
+     * WhatsApp's own UI) in addition to the normal direction.
+     */
+    private fun findTextMatchInZone(node: AccessibilityNodeInfo, candidates: List<String>, zoneBottomPx: Int): Boolean {
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (bounds.top in 0..zoneBottomPx) {
+            val text = node.text?.toString()?.let { stripBidiMarks(it) }
+                ?: node.contentDescription?.toString()?.let { stripBidiMarks(it) }
+            if (text != null && text.isNotBlank()) {
+                for (candidate in candidates) {
+                    if (text.equals(candidate, ignoreCase = true) ||
+                        text.startsWith(candidate, ignoreCase = true) ||
+                        (text.length >= 4 && candidate.startsWith(text, ignoreCase = true))
+                    ) {
+                        return true
+                    }
+                }
+            }
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            if (findTextMatchInZone(child, candidates, zoneBottomPx)) return true
+        }
+        return false
     }
 
     private fun findTextMatch(node: AccessibilityNodeInfo, candidates: List<String>): AccessibilityNodeInfo? {

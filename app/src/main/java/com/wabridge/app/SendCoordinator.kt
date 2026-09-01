@@ -29,7 +29,7 @@ object SendCoordinator {
         val searchByName: Boolean = false
     )
 
-    enum class Result { SUCCESS, FAILED_NO_TARGET_SCREEN, FAILED_NO_SEND_BUTTON, TIMEOUT }
+    enum class Result { SUCCESS, FAILED_NO_TARGET_SCREEN, FAILED_NO_SEND_BUTTON, FAILED_WRONG_CHAT, TIMEOUT }
 
     @Volatile var current: PendingSend? = null
         private set

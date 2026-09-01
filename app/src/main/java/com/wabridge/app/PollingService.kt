@@ -157,6 +157,32 @@ class PollingService : Service() {
             return
         }
 
+        // PRECISE PATH (decided here, actually FIRED later — see below —
+        // only once the job is registered with SendCoordinator, so the
+        // accessibility service is guaranteed to already be listening
+        // before WhatsApp's screen changes; firing it any earlier would
+        // race against the window-change event and could get silently
+        // ignored): OpenIntentRegistry captures, on EVERY notification
+        // (group or private - see WaNotificationListener), the
+        // notification's own contentIntent - exactly the PendingIntent
+        // Android/WhatsApp create for tapping that specific
+        // notification. Firing it opens the EXACT right conversation
+        // with zero text-matching or UI guessing involved, so it's
+        // strictly more precise than search-by-name below and is tried
+        // first whenever we have no phoneOrLink.
+        //
+        // Same durability caveat as the reply fast-path below: only
+        // valid while this app's process hasn't restarted and the
+        // source notification hasn't been dismissed/replaced since -
+        // there is no way to make ANY notification-derived handle live
+        // forever (Android itself invalidates PendingIntents on
+        // dismissal, this isn't something this app controls). If it
+        // turns out to be stale when we actually fire it below, we
+        // remove it and report failure immediately rather than waiting
+        // out the full timeout - the NEXT poll cycle will then see
+        // nothing in the registry and go straight to search-by-name.
+        val capturedOpenIntent = if (phoneOrLink.isBlank()) OpenIntentRegistry.get(target) else null
+
         // FIX (31.8.2026, admin-less-group fallback): a blank
         // phoneOrLink used to mean an unconditional skip (see the old
         // comment/log this replaced) - in practice this happens
@@ -164,17 +190,21 @@ class PollingService : Service() {
         // GroupLinkLearner can then never learn an invite link no
         // matter how many times it retries (WhatsApp simply doesn't
         // expose "Invite via link" to non-admin members by default).
-        // Rather than requiring the invite link at all, fall back to
-        // driving WhatsApp's own in-app search by the target's exact
-        // display name - see SendCoordinator.PendingSend.searchByName
-        // and WaSendAccessibilityService's handling of it. This is
-        // still attempted for BOTH group and private targets (the
-        // mechanism is identical either way), so it also helps a
-        // private contact we never captured/saved a phone number for.
-        val searchByName = phoneOrLink.isBlank()
-        if (searchByName) {
-            Log.i(TAG, "No phoneOrLink for row=$rowNumber target=$target - will fall back to in-app search by name")
-            EventLog.log("Poll: ℹ️ אין phoneOrLink עבור row=$rowNumber target=$target (כנראה אין הרשאות אדמין/קישור הזמנה) - מנסה לפתוח דרך חיפוש בתוך וואטסאפ במקום")
+        // If we have a capturedOpenIntent we don't need this fuzzy
+        // fallback at all. Otherwise, fall back to driving WhatsApp's
+        // own in-app search by the target's exact display name - see
+        // SendCoordinator.PendingSend.searchByName and
+        // WaSendAccessibilityService's handling of it. This is still
+        // attempted for BOTH group and private targets (the mechanism
+        // is identical either way), so it also helps a private contact
+        // we never captured/saved a phone number for.
+        val searchByName = phoneOrLink.isBlank() && capturedOpenIntent == null
+        if (capturedOpenIntent != null) {
+            Log.i(TAG, "Have a captured contentIntent for row=$rowNumber target=$target - will use it instead of search-by-name")
+            EventLog.log("Poll: 🎯 יש Intent שמור מההתראה עבור '$target' - אשתמש בו לפתיחה מדויקת (לא חיפוש טקסטואלי)")
+        } else if (searchByName) {
+            Log.i(TAG, "No phoneOrLink/captured intent for row=$rowNumber target=$target - will fall back to in-app search by name")
+            EventLog.log("Poll: ℹ️ אין phoneOrLink ואין Intent שמור עבור row=$rowNumber target=$target (כנראה אין הרשאות אדמין/קישור הזמנה, וגם ההתראה המקורית כבר לא חיה) - מנסה לפתוח דרך חיפוש בתוך וואטסאפ במקום")
         }
 
         Log.i(TAG, "Pending job row=$rowNumber type=$type target=$target")
@@ -231,7 +261,24 @@ class PollingService : Service() {
         }
 
         try {
-            if (searchByName) {
+            if (capturedOpenIntent != null) {
+                // Fired here (not up in the decision block above) so the
+                // job is already registered with SendCoordinator first -
+                // WaSendAccessibilityService needs to already be
+                // "listening" before WhatsApp's window actually changes,
+                // or it can miss the very event that would kick off its
+                // search.
+                try {
+                    capturedOpenIntent.send()
+                    Log.i(TAG, "Opened exact chat for '$target' via captured contentIntent")
+                    EventLog.log("Poll: פתחתי את וואטסאפ (Intent מדויק מההתראה)")
+                } catch (e: PendingIntent.CanceledException) {
+                    Log.w(TAG, "Captured open-intent for '$target' went stale between check and fire - removing", e)
+                    EventLog.log("Poll: ❌ ה-Intent השמור עבור '$target' פג תוקף ברגע השליחה - מסיר, ינסה חיפוש-לפי-שם בסבב הבא")
+                    OpenIntentRegistry.remove(target)
+                    SendCoordinator.reportResult(SendCoordinator.Result.FAILED_NO_TARGET_SCREEN)
+                }
+            } else if (searchByName) {
                 // No URL to deep-link into at all - just bring WhatsApp
                 // to the foreground on whatever screen it last had open
                 // (usually the chat list). WaSendAccessibilityService's
@@ -286,6 +333,18 @@ class PollingService : Service() {
                 Log.e(TAG, "markSent call failed for row $rowNumber", e)
                 EventLog.log("Poll: ⚠️ markSent נכשל: ${e.message}")
             }
+        } else if (result == SendCoordinator.Result.FAILED_WRONG_CHAT) {
+            // SAFETY GUARD tripped inside WaSendAccessibilityService -
+            // nothing was typed or sent anywhere. Deliberately does NOT
+            // call markSent, same as any other failure, so this row
+            // stays pending and gets retried. Logged distinctly (not
+            // just "did NOT succeed") because this specific failure
+            // means the automatic chat-opening step (search-by-name or
+            // captured intent) landed on the wrong screen - worth a
+            // human's attention if it keeps recurring for the same
+            // target, rather than just a generic retry.
+            Log.w(TAG, "SAFETY ABORT for row $rowNumber - opened screen did not match target '$target', nothing was sent")
+            EventLog.log("Poll: 🛑 עצירת בטיחות לשורה $rowNumber - המסך שנפתח לא תאם ל-'$target', שום דבר לא נשלח. ינסה שוב בסבב הבא")
         } else {
             Log.w(TAG, "Send did NOT succeed for row $rowNumber (result=$result) - will retry next cycle")
             EventLog.log("Poll: ❌ השליחה לא הצליחה (result=$result), ינסה שוב בסבב הבא")
