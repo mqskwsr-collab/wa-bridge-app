@@ -241,38 +241,15 @@ object WaMediaLocator {
             triedDirs.add(candidateDir)
 
             val filesHere = candidateDir.listFiles { f -> f.isFile } ?: emptyArray()
-            if (filesHere.isEmpty()) {
-                // DIAGNOSTIC (21.8.2026): on-device logs show this folder
-                // reporting 0 files EVERY time, including for files that are
-                // NOT new (72 pre-existing files confirmed present via a
-                // separate file manager app, some days old) - so this isn't
-                // "new file not visible yet", listFiles() is failing to see
-                // ANY of the directory's contents. That points at a
-                // permission problem masquerading as an empty folder, not a
-                // path or timing problem. Log the raw signals needed to tell
-                // apart the possible causes: is isExternalStorageManager()
-                // actually true, can we even read/execute the dir, and does
-                // the plain String[] list() (different underlying code path
-                // than listFiles()) agree or disagree with listFiles().
-                EventLog.log(
-                    "Media: 🔎 אבחון הרשאות (${candidateDir.absolutePath}) - sdkInt=${Build.VERSION.SDK_INT} isExternalStorageManager=${isAvailable(context)} " +
-                        "dir.exists=${candidateDir.exists()} dir.canRead=${candidateDir.canRead()} dir.canExecute=${candidateDir.canExecute()} " +
-                        "list()=${candidateDir.list()?.size ?: "null"} listFiles()=${filesHere.size}"
-                )
-                // FIX (28.8.2026, method B): the 28.8 08:37 on-device log
-                // showed a real mismatch here for "WhatsApp Audio" -
-                // list()=2 but listFiles()=0 - meaning 2 raw entries exist
-                // that the isFile() filter doesn't count as files (could
-                // be real files File.isFile() can't confirm due to a
-                // permission quirk, or could be subfolders/symlinks).
-                // Only a count was ever logged before, never the actual
-                // names - logging them now settles it directly instead of
-                // guessing.
-                val rawNames = candidateDir.list()
-                if (rawNames != null && rawNames.isNotEmpty() && rawNames.size != filesHere.size) {
-                    EventLog.log("Media: 🔎 אבחון - list() גולמי ל-${candidateDir.absolutePath}: ${rawNames.joinToString(" | ")}")
-                }
-            }
+            // FIX (01.9.2026, cleanup): the "0 files here" mystery this used
+            // to log verbosely for every candidate folder on every call is
+            // solved and documented (see CANDIDATE_BASE_PATHS/SUBFOLDER_*
+            // comments above) - WhatsApp's own "WhatsApp Audio" folder here
+            // is expected to be empty of direct files (it only holds the
+            // Sent/Private subfolders, and the real save now lands in
+            // Downloads via the SAF "Save as…" flow instead). No longer
+            // worth logging on every routine check.
+
 
             val matchHere = filesHere
                 .filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= matchWindowMs }
@@ -296,28 +273,18 @@ object WaMediaLocator {
 
         if (best == null) {
             Log.w(TAG, "No recent file matched in any of: ${triedDirs.joinToString(" , ") { it.absolutePath }} within ${matchWindowMs}ms of $notificationTimeMs")
-            EventLog.log("Media: ⚠️ לא נמצא קובץ תואם בזמן באף אחת מ-${triedDirs.size} תיקיות שנבדקו")
-            triedDirs.forEach { d -> logCandidateTimings(d, d.listFiles { f -> f.isFile } ?: emptyArray(), notificationTimeMs) }
-            // FIX (28.8.2026, voice-note research): for voice notes
-            // specifically, ALSO run the broad whatsapp-folder scan here
-            // (previously this only ran when triedDirs was completely
-            // EMPTY, i.e. no candidate folder existed at all) - voice
-            // notes so far always find an existing-but-empty folder, so
-            // the broad scan never ran and we never got a full picture
-            // of what other whatsapp-named folders actually exist on
-            // this device (e.g. a correctly-named audio folder we
-            // haven't guessed yet).
             if (type == MediaClassifier.MediaType.VOICE_NOTE) {
-                logDiagnostics(root)
-                // FIX (30.8.2026, method G breakthrough): a real
-                // on-device test confirmed the per-message "שיתוף"/Share
-                // menu has a native "Save as…" (Storage Access
-                // Framework) target, which - if our new accessibility
-                // flow completes it - writes the actual file via the
-                // system's document-creation picker. That picker
-                // defaults to the plain top-level Downloads folder
-                // (confirmed present at storage root: "Download"), NOT
-                // any WhatsApp-specific path, so check there directly.
+                // FIX (01.9.2026, cleanup): on-device testing confirmed voice
+                // notes now reliably land in the plain Downloads folder via
+                // the "Save as…" automation (WaSendAccessibilityService) -
+                // check there FIRST, cheaply, before running the expensive
+                // forensic folder scan below. That scan produces ~40 log
+                // lines every single time and is only worth that noise if
+                // Downloads ALSO comes up empty (a genuine, unexpected
+                // failure) - not on every routine "not saved yet" check,
+                // which is the common case (this locator runs once right
+                // when the notification arrives, before the save has even
+                // been triggered).
                 val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                 val downloadsMatch = downloadsDir.listFiles { f -> f.isFile }
                     ?.filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= matchWindowMs }
@@ -326,6 +293,11 @@ object WaMediaLocator {
                     EventLog.log("Media: ✅ נמצא קובץ בתיקיית ההורדות (דרך \"Save as…\"): ${downloadsMatch.name}")
                     return FoundMedia(downloadsMatch, guessMimeType(downloadsMatch.name))
                 }
+                EventLog.log("Media: ⚠️ לא נמצא קובץ תואם בזמן באף אחת מ-${triedDirs.size} תיקיות שנבדקו, ולא בתיקיית ההורדות")
+                triedDirs.forEach { d -> logCandidateTimings(d, d.listFiles { f -> f.isFile } ?: emptyArray(), notificationTimeMs) }
+                // Only reached if Downloads genuinely didn't have it either -
+                // worth the full forensic scan at that point.
+                logDiagnostics(root)
                 // FIX (28.8.2026, root-cache research): every accessible
                 // path has now been exhausted (shared storage, MediaStore,
                 // UI menus). Forensic sources confirm WhatsApp genuinely
@@ -343,6 +315,9 @@ object WaMediaLocator {
                     EventLog.log("Media: ✅ נמצא קובץ: ${rootFile.name} (דרך root, מטמון פרטי)")
                     return FoundMedia(rootFile, guessMimeType(rootFile.name))
                 }
+            } else {
+                EventLog.log("Media: ⚠️ לא נמצא קובץ תואם בזמן באף אחת מ-${triedDirs.size} תיקיות שנבדקו")
+                triedDirs.forEach { d -> logCandidateTimings(d, d.listFiles { f -> f.isFile } ?: emptyArray(), notificationTimeMs) }
             }
             return null
         }
