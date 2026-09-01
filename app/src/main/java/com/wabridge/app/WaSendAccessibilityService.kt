@@ -345,6 +345,20 @@ class WaSendAccessibilityService : AccessibilityService() {
     // (re-long-press) attempt Method E makes if it finds the selection
     // toolbar already gone by the time it runs (see call site).
     private var hasTriedVoiceNoteReselectForMoreOptions = false
+    // FIX (01.9.2026, reselect race condition): hasTriedVoiceNoteReselectForMoreOptions
+    // above is set synchronously the instant the re-select long-press gesture is
+    // dispatched, but the gesture itself takes 700ms to finish (same shape as the
+    // long-press bug fixed on 27.8.2026, see voiceNoteLongPressCompleted below -
+    // that fix was never mirrored here). SEARCH_INTERVAL_MS is 400ms, so the very
+    // next poll tick saw the guard flag already true and fell straight into the
+    // "search for More options" branch before the gesture's onCompleted callback
+    // had run and the selection toolbar had actually reappeared - grabbing the
+    // chat header's "More options" again (the 01.9 19:54:38 on-device log
+    // confirms this: the reselect log line and the "found More options" line
+    // land in the same 400ms tick). This flag is set ONLY inside the reselect
+    // gesture's own onCompleted callback, mirroring voiceNoteLongPressCompleted,
+    // so the More-options search can't run until the toolbar is genuinely back.
+    private var voiceNoteReselectCompleted = false
     // FIX (27.8.2026, race-condition bug): the 27.8 21:37 on-device log
     // showed the "More options" tap firing BEFORE the long-press
     // gesture's own onCompleted callback log line - SEARCH_INTERVAL_MS
@@ -561,6 +575,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             voiceNotePlaybackTapCompleted = false
             hasTriedVoiceNoteLastMoreOptionsTap = false
             hasTriedVoiceNoteReselectForMoreOptions = false
+            voiceNoteReselectCompleted = false
             voiceNoteLongPressCompleted = false
             lastMediaDownloadDumpTime = 0L
             dynamicMediaDownloadTimeoutMs = MEDIA_DOWNLOAD_TIMEOUT_MS
@@ -1571,15 +1586,27 @@ class WaSendAccessibilityService : AccessibilityService() {
                                     override fun onCompleted(gestureDescription: GestureDescription?) {
                                         EventLog.log("A11y-MediaDownload: 🔁 [ניסוי-E] אבחון אחרי בחירה מחדש של ההודעה:")
                                         rootInActiveWindow?.let { dumpFullNodeTree(it) }
-                                        // hasTriedVoiceNoteLastMoreOptionsTap stays false
-                                        // on purpose so the NEXT poll tick retries the
-                                        // More-options search below, now that the
-                                        // toolbar should be back.
+                                        // FIX (01.9.2026): only NOW, once the gesture has
+                                        // genuinely finished and the selection toolbar
+                                        // should really be back on screen, is it safe to
+                                        // let the next poll tick search for More options -
+                                        // same fix shape as voiceNoteLongPressCompleted.
+                                        voiceNoteReselectCompleted = true
                                     }
                                     override fun onCancelled(gestureDescription: GestureDescription?) {
                                         EventLog.log("A11y-MediaDownload: 🔁 [ניסוי-E] הלחיצה הארוכה החוזרת בוטלה ע\"י המערכת")
+                                        // Nothing will ever set voiceNoteReselectCompleted
+                                        // if the gesture is cancelled - fall through to the
+                                        // More-options search anyway on the next tick rather
+                                        // than hang until the outer 14s timeout.
+                                        voiceNoteReselectCompleted = true
                                     }
                                 }, null)
+                            } else if (!selectionToolbarPresent && hasTriedVoiceNoteReselectForMoreOptions && !voiceNoteReselectCompleted) {
+                                // Re-select gesture already dispatched but its onCompleted/
+                                // onCancelled callback hasn't fired yet - do nothing this
+                                // tick and wait, instead of racing ahead and grabbing the
+                                // chat header's "More options" again.
                             } else {
                             hasTriedVoiceNoteLastMoreOptionsTap = true
                             val lastMoreOptions = findLastClickableMatchingRegex(root, MORE_OPTIONS_DESC_REGEX)
