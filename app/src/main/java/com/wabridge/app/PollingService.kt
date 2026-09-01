@@ -151,10 +151,30 @@ class PollingService : Service() {
         val text = json.optString("text", "")
         val phoneOrLink = json.optString("phoneOrLink", "")
 
-        if (rowNumber < 0 || phoneOrLink.isBlank()) {
-            Log.w(TAG, "Pending job missing rowNumber/phoneOrLink, skipping this cycle: $json")
-            EventLog.log("Poll: ⚠️ נמצאה שורה ממתינה (row=$rowNumber, target=$target) אך אין phoneOrLink - מדלג. תוסיף את '$target' ידנית לטאב Targets.")
+        if (rowNumber < 0) {
+            Log.w(TAG, "Pending job missing rowNumber, skipping this cycle: $json")
+            EventLog.log("Poll: ⚠️ נמצאה שורה ממתינה עם row לא תקין - מדלג.")
             return
+        }
+
+        // FIX (31.8.2026, admin-less-group fallback): a blank
+        // phoneOrLink used to mean an unconditional skip (see the old
+        // comment/log this replaced) - in practice this happens
+        // permanently for any group we're not admin in, since
+        // GroupLinkLearner can then never learn an invite link no
+        // matter how many times it retries (WhatsApp simply doesn't
+        // expose "Invite via link" to non-admin members by default).
+        // Rather than requiring the invite link at all, fall back to
+        // driving WhatsApp's own in-app search by the target's exact
+        // display name - see SendCoordinator.PendingSend.searchByName
+        // and WaSendAccessibilityService's handling of it. This is
+        // still attempted for BOTH group and private targets (the
+        // mechanism is identical either way), so it also helps a
+        // private contact we never captured/saved a phone number for.
+        val searchByName = phoneOrLink.isBlank()
+        if (searchByName) {
+            Log.i(TAG, "No phoneOrLink for row=$rowNumber target=$target - will fall back to in-app search by name")
+            EventLog.log("Poll: ℹ️ אין phoneOrLink עבור row=$rowNumber target=$target (כנראה אין הרשאות אדמין/קישור הזמנה) - מנסה לפתוח דרך חיפוש בתוך וואטסאפ במקום")
         }
 
         Log.i(TAG, "Pending job row=$rowNumber type=$type target=$target")
@@ -201,7 +221,7 @@ class PollingService : Service() {
             return
         }
 
-        val job = SendCoordinator.PendingSend(rowNumber, type, target, text, phoneOrLink)
+        val job = SendCoordinator.PendingSend(rowNumber, type, target, text, phoneOrLink, searchByName)
         val latch = CountDownLatch(1)
         var result: SendCoordinator.Result = SendCoordinator.Result.TIMEOUT
 
@@ -210,24 +230,39 @@ class PollingService : Service() {
             latch.countDown()
         }
 
-        val chatUrl = if (type == "group") {
-            phoneOrLink
-        } else {
-            "https://api.whatsapp.com/send?phone=$phoneOrLink"
-        }
-
         try {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(chatUrl)).apply {
-                // CLEAR_TASK forces WhatsApp's existing task to be torn
-                // down and rebuilt fresh from this intent, instead of
-                // just resuming whatever screen was already open (which
-                // was observed to sometimes silently ignore the deep
-                // link and land on an unrelated chat).
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                setPackage("com.whatsapp")
+            if (searchByName) {
+                // No URL to deep-link into at all - just bring WhatsApp
+                // to the foreground on whatever screen it last had open
+                // (usually the chat list). WaSendAccessibilityService's
+                // searchByName handling takes it from there: opens
+                // in-app search, types the target name, taps the
+                // matching row.
+                val launchIntent = packageManager.getLaunchIntentForPackage("com.whatsapp")
+                if (launchIntent == null) {
+                    throw IOException("com.whatsapp אינו מותקן / getLaunchIntentForPackage החזיר null")
+                }
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                startActivity(launchIntent)
+                EventLog.log("Poll: פתחתי את וואטסאפ (חיפוש לפי שם - אין קישור/מספר)")
+            } else {
+                val chatUrl = if (type == "group") {
+                    phoneOrLink
+                } else {
+                    "https://api.whatsapp.com/send?phone=$phoneOrLink"
+                }
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(chatUrl)).apply {
+                    // CLEAR_TASK forces WhatsApp's existing task to be torn
+                    // down and rebuilt fresh from this intent, instead of
+                    // just resuming whatever screen was already open (which
+                    // was observed to sometimes silently ignore the deep
+                    // link and land on an unrelated chat).
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    setPackage("com.whatsapp")
+                }
+                startActivity(intent)
+                EventLog.log("Poll: פתחתי את וואטסאפ (${if (type=="group") "קבוצה" else "פרטי"})")
             }
-            startActivity(intent)
-            EventLog.log("Poll: פתחתי את וואטסאפ (${if (type=="group") "קבוצה" else "פרטי"})")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to launch WhatsApp intent", e)
             EventLog.log("Poll: ❌ נכשל לפתוח וואטסאפ: ${e.message}")

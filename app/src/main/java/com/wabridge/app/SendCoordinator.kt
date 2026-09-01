@@ -16,7 +16,17 @@ object SendCoordinator {
         val type: String,      // "group" | "private"
         val target: String,
         val text: String,
-        val phoneOrLink: String
+        val phoneOrLink: String,
+        // FIX (31.8.2026, admin-less-group fallback): true when
+        // PollingService had NO phoneOrLink to work with at all (most
+        // commonly: a group we're not an admin in, so GroupLinkLearner
+        // could never learn an invite link - see its own doc comment).
+        // phoneOrLink is then simply "" and WaSendAccessibilityService
+        // does not deep-link into anything; instead it drives
+        // WhatsApp's own in-app search UI to find target by exact
+        // display name and opens the matching chat-list row directly,
+        // which needs no invite link or admin rights at all.
+        val searchByName: Boolean = false
     )
 
     enum class Result { SUCCESS, FAILED_NO_TARGET_SCREEN, FAILED_NO_SEND_BUTTON, TIMEOUT }
