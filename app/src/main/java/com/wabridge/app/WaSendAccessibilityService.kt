@@ -2626,8 +2626,8 @@ class WaSendAccessibilityService : AccessibilityService() {
         val midX = screenRect.left + screenRect.width() / 2
         val midY = screenRect.top + screenRect.height() / 2
 
-        var best: AccessibilityNodeInfo? = null
-        var bestScore = -1
+        data class Candidate(val node: AccessibilityNodeInfo, val hasId: Boolean, val score: Int)
+        val candidates = mutableListOf<Candidate>()
 
         fun visit(node: AccessibilityNodeInfo) {
             if (node.isClickable) {
@@ -2638,13 +2638,19 @@ class WaSendAccessibilityService : AccessibilityService() {
                     node.getBoundsInScreen(r)
                     val cx = r.centerX()
                     val cy = r.centerY()
-                    if (cx > midX && cy > midY) {
-                        // Score by how far into the bottom-right corner it sits.
-                        val score = cx + cy
-                        if (score > bestScore) {
-                            bestScore = score
-                            best = node
-                        }
+                    // FIX (01.9.2026, wrong-button confirmed): on-device log
+                    // showed this quadrant search alone (no size filter)
+                    // picking one of Amaze's small per-row "..." action
+                    // buttons (~80x44px, opens Open with/Cut/Copy/... menu)
+                    // instead of the real Save FAB (~152x168px) because the
+                    // small button happened to sit slightly closer to the
+                    // exact bottom-right corner in a partially-offscreen
+                    // last row. A real floating action button is a
+                    // decently-sized square icon (~56dp+), not a tiny list-
+                    // row icon - filter those out.
+                    if (cx > midX && cy > midY && r.width() >= 100 && r.height() >= 100) {
+                        val hasId = !node.viewIdResourceName.isNullOrBlank()
+                        candidates.add(Candidate(node, hasId, cx + cy))
                     }
                 }
             }
@@ -2655,7 +2661,19 @@ class WaSendAccessibilityService : AccessibilityService() {
         }
 
         visit(root)
-        return best
+        if (candidates.isEmpty()) return null
+
+        // FIX (01.9.2026, wrong-button confirmed): the same on-device log
+        // showed the real Save FAB with id='' while every per-row action
+        // button DID carry a real resource-id (e.g.
+        // com.amaze.filemanager:id/properties) - a standalone FAB is far
+        // more likely to have no resource-id than a button inside a
+        // repeated list-item layout, so prefer id-less candidates first
+        // and only fall back to id-bearing ones if none qualify (in case
+        // some other picker's FAB genuinely does carry an id).
+        val idLess = candidates.filter { !it.hasId }
+        val pool = if (idLess.isNotEmpty()) idLess else candidates
+        return pool.maxByOrNull { it.score }?.node
     }
 
     private fun findClickableMatchingRegex(node: AccessibilityNodeInfo, regex: Regex): AccessibilityNodeInfo? {
