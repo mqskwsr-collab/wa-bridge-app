@@ -87,6 +87,11 @@ class WaSendAccessibilityService : AccessibilityService() {
         // MIN_POLL_CYCLES_BEFORE_SWIPE below, applied to search results
         // instead of album swipes.
         private const val SEARCH_QUERY_SETTLE_MS = 1200L
+    // How long to wait after tapping the matching search result before
+    // the generic entry/send lookup starts checking for the real
+    // conversation's compose box - avoids treating a still-loading
+    // transition frame as "nothing here yet".
+    private const val RESULT_CLICK_SETTLE_MS = 800L
         private val SEARCH_ICON_REGEX = Regex("""(חיפוש|search)""", RegexOption.IGNORE_CASE)
         private const val MAX_TAP_ATTEMPTS = 8
         private const val LEARN_TIMEOUT_MS = 18000L
@@ -398,6 +403,11 @@ class WaSendAccessibilityService : AccessibilityService() {
     private var typedSearchQuery = false
     private var searchQueryTypedAt = 0L
     private var searchResultNotFoundLogged = false
+    // Set once the matching chat-list row has actually been tapped -
+    // from that point on, this state machine gets out of the way
+    // entirely and the generic entry/send logic below takes over.
+    private var searchByNameResultClicked = false
+    private var resultClickedAt = 0L
 
     // Set once per job, right before the first type/send attempt - see
     // the SAFETY GUARD block in searchRunnable for what this gates.
@@ -484,6 +494,8 @@ class WaSendAccessibilityService : AccessibilityService() {
             typedSearchQuery = false
             searchQueryTypedAt = 0L
             searchResultNotFoundLogged = false
+            searchByNameResultClicked = false
+            resultClickedAt = 0L
             titleVerified = false
             lastDiagnosticDumpTime = 0L
             lastSendDumpTime = 0L
@@ -601,6 +613,113 @@ class WaSendAccessibilityService : AccessibilityService() {
                 EventLog.log("A11y: 🔍 [+${elapsed / 1000}s] חלון=$pkg/$cls | חלונות=$windowCount | nodes עם 'Edit' ב-class=$editCount | טקסטים: ${texts.joinToString(" | ").ifBlank { "(אין טקסטים כלל)" }}")
             }
 
+            // FIX (01.9.2026, search-box-vs-message-box confusion):
+            // handle the ENTIRE "navigate to the right chat" sequence
+            // for searchByName jobs FIRST, before ever computing
+            // entryNode/sendNode for the real send flow below.
+            // findEditText() is generic - it matches WhatsApp's own
+            // search box exactly as readily as the real message-compose
+            // box. Confirmed from a real device log on 01.9.2026: once
+            // the search icon was clicked, the search box rendered, the
+            // generic entryNode lookup below found it immediately on the
+            // very next tick, and the code fell straight into the real
+            // send flow's title-verification guard - which then
+            // (correctly!) refused to proceed because the Search screen
+            // obviously doesn't show the target's name in its toolbar,
+            // aborting the whole job before the search query was ever
+            // even typed. Gating this whole sequence ahead of the
+            // generic lookup, keyed off searchByNameResultClicked, fixes
+            // that: the generic entry/send logic (and its title guard)
+            // now only ever runs AFTER we've actually tapped a matching
+            // chat-list row, on a later tick.
+            if (job.searchByName && !searchByNameResultClicked) {
+                if (!clickedSearchIcon) {
+                    val searchIcon = findClickableMatchingRegex(root, SEARCH_ICON_REGEX)
+                    if (searchIcon != null) {
+                        Log.i(TAG, "searchByName: found search icon, clicking")
+                        EventLog.log("A11y-Search: 🔎 אין קישור הזמנה/מספר - פותח חיפוש בתוך וואטסאפ עבור '${job.target}'")
+                        clickedSearchIcon = true
+                        searchIcon.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    } else if (elapsed - lastDiagnosticDumpTime > 2000L) {
+                        EventLog.log("A11y-Search: ⚠️ לא נמצא (עדיין) כפתור חיפוש - מנסה שוב")
+                    }
+                    handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                    return
+                }
+
+                if (!typedSearchQuery) {
+                    // Reuse the generic EditText finder - at this point
+                    // in the flow the only EditText on screen should be
+                    // WhatsApp's own search box (no conversation is open
+                    // yet, so there's no real compose box to confuse it
+                    // with).
+                    val searchField = findEditText(root)
+                    if (searchField != null) {
+                        val args = Bundle()
+                        args.putCharSequence(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                            job.target
+                        )
+                        val typedOk = searchField.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                        if (typedOk) {
+                            Log.i(TAG, "searchByName: typed target name into search field")
+                            EventLog.log("A11y-Search: הקלדתי '${job.target}' בתיבת החיפוש, ממתין לתוצאות")
+                            typedSearchQuery = true
+                            searchQueryTypedAt = elapsed
+                        } else {
+                            EventLog.log("A11y-Search: ⚠️ הקלדה בתיבת החיפוש נכשלה, מנסה שוב")
+                        }
+                    }
+                    handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                    return
+                }
+
+                if (elapsed - searchQueryTypedAt < SEARCH_QUERY_SETTLE_MS) {
+                    // Give WhatsApp a moment to actually render results
+                    // before looking for a matching row - checking on
+                    // the very first tick after typing reliably finds
+                    // nothing yet.
+                    handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                    return
+                }
+
+                // findClickableByText does a recursive text/desc search
+                // (with bidi-mark stripping already baked in via
+                // findTextMatch) and walks up to the nearest clickable
+                // ancestor - exactly what a chat-list row needs, since
+                // the row's own text usually lives in a child TextView
+                // rather than on the clickable container itself. Guard
+                // against it accidentally re-matching the search box
+                // itself (which is also "clickable" and, after typing,
+                // contains the exact same text) by rejecting an
+                // Edit*-classed result.
+                val resultNode = findClickableByText(root, listOf(job.target))
+                if (resultNode != null && resultNode.className?.contains("Edit", ignoreCase = true) != true) {
+                    Log.i(TAG, "searchByName: found matching chat-list result, clicking")
+                    EventLog.log("A11y-Search: ✅ נמצאה תוצאה תואמת ל-'${job.target}' בחיפוש, לוחץ עליה")
+                    resultNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    searchByNameResultClicked = true
+                    resultClickedAt = elapsed
+                } else if (!searchResultNotFoundLogged && elapsed - searchQueryTypedAt > 3000L) {
+                    searchResultNotFoundLogged = true
+                    val texts = mutableListOf<String>()
+                    collectTexts(root, texts, maxCount = 12)
+                    EventLog.log("A11y-Search: ⚠️ עדיין לא נמצאה תוצאה תואמת ל-'${job.target}'. מוצג כרגע במסך: ${texts.joinToString(" | ").ifBlank { "(אין טקסטים)" }}")
+                }
+                handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                return
+            }
+
+            if (job.searchByName && searchByNameResultClicked && elapsed - resultClickedAt < RESULT_CLICK_SETTLE_MS) {
+                // Just tapped the matching chat-list row - give the real
+                // conversation screen a brief moment to actually render
+                // before starting the generic entry/send search below,
+                // so we don't mistake a still-loading transition frame
+                // for "nothing here".
+                handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                return
+            }
+
             // Search across ALL open windows, not just the active one -
             // WhatsApp's compose bar could conceivably live in a
             // separate accessibility window (e.g. overlay/IME-adjacent
@@ -626,18 +745,10 @@ class WaSendAccessibilityService : AccessibilityService() {
                 // built for - the invite-link preview screen, which has
                 // essentially nothing else clickable on it. A
                 // searchByName job (see below) never opens that screen
-                // at all - WhatsApp just lands on the ordinary home/
-                // chat-list screen, which is full of clickable rows
-                // whose own text (a contact's last-message preview, a
-                // "New chat" FAB, etc.) can easily contain the same
-                // substring and get clicked instead, opening a
-                // completely unrelated chat and sending the message
-                // there. Confirmed from a real device log on
-                // 01.9.2026: this exact block fired first and opened
-                // the wrong chat before the search-icon step below ever
-                // got a chance to run. So: never run this for a
-                // searchByName job - go straight to the search-icon
-                // handling instead.
+                // at all, and by the time control reaches here it has
+                // ALREADY completed its own navigation above (or this
+                // isn't a searchByName job at all) - so never run this
+                // for a searchByName job either way.
                 if (!job.searchByName && !clickedIntermediateScreen) {
                     val intermediateBtn = findClickableByText(root, listOf("הודעה", "Message", "message"))
                     if (intermediateBtn != null) {
@@ -648,98 +759,6 @@ class WaSendAccessibilityService : AccessibilityService() {
                         handler.postDelayed(this, SEARCH_INTERVAL_MS)
                         return
                     }
-                }
-
-                // FIX (31.8.2026, admin-less-group fallback): a
-                // searchByName job (see PendingSend.searchByName) never
-                // had a deep link to open in the first place -
-                // PollingService just brought WhatsApp to the
-                // foreground on whatever screen it last had open, so
-                // entryNode being null here is the EXPECTED starting
-                // state, not a loading delay. Drive WhatsApp's own
-                // in-app search instead: tap the search icon, type the
-                // exact target display name, then tap the matching
-                // chat-list row - once that row opens the real
-                // conversation, entryNode will be found on a later tick
-                // and the normal flow above takes over exactly as if a
-                // deep link had opened it.
-                if (job.searchByName) {
-                    if (!clickedSearchIcon) {
-                        val searchIcon = findClickableMatchingRegex(root, SEARCH_ICON_REGEX)
-                        if (searchIcon != null) {
-                            Log.i(TAG, "searchByName: found search icon, clicking")
-                            EventLog.log("A11y-Search: 🔎 אין קישור הזמנה/מספר - פותח חיפוש בתוך וואטסאפ עבור '${job.target}'")
-                            clickedSearchIcon = true
-                            searchIcon.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        } else if (elapsed - lastDiagnosticDumpTime > 2000L) {
-                            EventLog.log("A11y-Search: ⚠️ לא נמצא (עדיין) כפתור חיפוש - מנסה שוב")
-                        }
-                        handler.postDelayed(this, SEARCH_INTERVAL_MS)
-                        return
-                    }
-
-                    if (!typedSearchQuery) {
-                        // Reuse the generic EditText finder - at this
-                        // point in the flow the only EditText on screen
-                        // should be WhatsApp's own search box.
-                        val searchField = findEditText(root)
-                        if (searchField != null) {
-                            val args = Bundle()
-                            args.putCharSequence(
-                                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                                job.target
-                            )
-                            val typedOk = searchField.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-                            if (typedOk) {
-                                Log.i(TAG, "searchByName: typed target name into search field")
-                                EventLog.log("A11y-Search: הקלדתי '${job.target}' בתיבת החיפוש, ממתין לתוצאות")
-                                typedSearchQuery = true
-                                searchQueryTypedAt = elapsed
-                            } else {
-                                EventLog.log("A11y-Search: ⚠️ הקלדה בתיבת החיפוש נכשלה, מנסה שוב")
-                            }
-                        }
-                        handler.postDelayed(this, SEARCH_INTERVAL_MS)
-                        return
-                    }
-
-                    if (elapsed - searchQueryTypedAt < SEARCH_QUERY_SETTLE_MS) {
-                        // Give WhatsApp a moment to actually render
-                        // results before looking for a matching row -
-                        // checking on the very first tick after typing
-                        // reliably finds nothing yet.
-                        handler.postDelayed(this, SEARCH_INTERVAL_MS)
-                        return
-                    }
-
-                    // findClickableByText does a recursive text/desc
-                    // search (with bidi-mark stripping already baked in
-                    // via findTextMatch) and walks up to the nearest
-                    // clickable ancestor - exactly what a chat-list row
-                    // needs, since the row's own text usually lives in a
-                    // child TextView rather than on the clickable
-                    // container itself. Guard against it accidentally
-                    // re-matching the search box itself (which is also
-                    // "clickable" and, after typing, contains the exact
-                    // same text) by rejecting an Edit*-classed result.
-                    val resultNode = findClickableByText(root, listOf(job.target))
-                    if (resultNode != null && resultNode.className?.contains("Edit", ignoreCase = true) != true) {
-                        Log.i(TAG, "searchByName: found matching chat-list result, clicking")
-                        EventLog.log("A11y-Search: ✅ נמצאה תוצאה תואמת ל-'${job.target}' בחיפוש, לוחץ עליה")
-                        resultNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        // Deliberately NOT resetting typedSearchQuery/
-                        // clickedSearchIcon here - if the tap opened the
-                        // wrong screen for some reason, this job will
-                        // simply time out like any other failed attempt
-                        // rather than looping back into search again.
-                    } else if (!searchResultNotFoundLogged && elapsed - searchQueryTypedAt > 3000L) {
-                        searchResultNotFoundLogged = true
-                        val texts = mutableListOf<String>()
-                        collectTexts(root, texts, maxCount = 12)
-                        EventLog.log("A11y-Search: ⚠️ עדיין לא נמצאה תוצאה תואמת ל-'${job.target}'. מוצג כרגע במסך: ${texts.joinToString(" | ").ifBlank { "(אין טקסטים)" }}")
-                    }
-                    handler.postDelayed(this, SEARCH_INTERVAL_MS)
-                    return
                 }
 
                 // Screen probably still loading (or this is not the chat
