@@ -10,7 +10,10 @@ import java.io.File
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 
 /**
  * Reads incoming WhatsApp (regular, package "com.whatsapp") notifications
@@ -144,6 +147,37 @@ class WaNotificationListener : NotificationListenerService() {
             lastMediaEventTimestamp = now
             return skip
         }
+
+        // FIX (2.9.2026, one-album-many-emails bug): the media-event
+        // dedupe above (shouldSkipMediaEvent) only ever suppressed the
+        // repeated MEDIA LOOKUP/ATTACH for a burst of notifications about
+        // the same growing album (WhatsApp reposts the album's summary
+        // text - '1 photo' -> '11 photos' -> '10 photos' -> '11 photos'
+        // again - up to half a dozen times as it syncs), but by design
+        // (see its own comment) it deliberately still let the PLAIN-TEXT
+        // POST go out for every one of those variants, to avoid ever
+        // dropping a genuinely new text message. Confirmed on-device
+        // (2.9 09:45): a single incoming 11-photo album produced 4
+        // separate emails (mediaCount 8, 3, 0, 0) because each distinct
+        // summary text was treated as its own "new message".
+        //
+        // Fix: ONLY for notifications MediaClassifier recognizes as a
+        // photo/video/voice-note summary (never for ordinary text
+        // messages - those are unaffected and still send immediately, so
+        // no risk of ever delaying/losing a real conversation message),
+        // don't POST right away. Instead debounce per target+mediaType:
+        // stash the latest title/text/phone/etc and (re)schedule a single
+        // send MEDIA_BURST_QUIET_MS after the MOST RECENT notification in
+        // the burst. Each new arrival for the same burst cancels and
+        // reschedules the pending send with the newer (larger) count/
+        // text, so only the final, most-complete version ever actually
+        // gets POSTed - and because the eventual attachMediaIfAny() call
+        // only happens once, at the end, it naturally picks up whichever
+        // files have synced to MediaStore by then instead of racing them
+        // across several partial emails.
+        private val scheduledExecutor = Executors.newSingleThreadScheduledExecutor()
+        private val pendingMediaSends = ConcurrentHashMap<String, ScheduledFuture<*>>()
+        private const val MEDIA_BURST_QUIET_MS = 4000L
 
         // FIX (19.8.2026) - media support, phase 1 (inbound only). Raw
         // file size cap before base64 (which inflates size by ~33%) -
@@ -425,10 +459,39 @@ class WaNotificationListener : NotificationListenerService() {
         }
 
         Log.i(TAG, "WhatsApp notification: title='$outgoingTitle' text='$text' phone=$phone isGroup=$isGroup -> forwarding")
-        EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
         val postTimeMs = sbn.postTime
         val contentIntentFinal = contentIntent
-        executor.execute { postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs, canonicalTarget, contentIntentFinal) }
+
+        // See MEDIA_BURST_QUIET_MS's doc comment above: only photo/video/
+        // voice-note summary notifications get coalesced. Plain text
+        // messages (MediaClassifier.classify == NONE) keep sending
+        // immediately, exactly as before this fix.
+        val burstMediaType = try {
+            MediaClassifier.classify(text)
+        } catch (e: Throwable) {
+            MediaClassifier.MediaType.NONE
+        }
+
+        if (burstMediaType == MediaClassifier.MediaType.NONE) {
+            EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
+            executor.execute { postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs, canonicalTarget, contentIntentFinal) }
+        } else {
+            val burstKey = "$canonicalTarget|${burstMediaType.name}"
+            EventLog.log("Listener: ⏳ הודעת מדיה - ממתין ${MEDIA_BURST_QUIET_MS}ms לפני שליחה כדי לאחד עדכונים נוספים לאותו אלבום (target='$canonicalTarget')")
+            val task = Runnable {
+                pendingMediaSends.remove(burstKey)
+                EventLog.log("Listener: ➡️ שולח ל-Apps Script (אחרי איחוד אלבום)...")
+                postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs, canonicalTarget, contentIntentFinal)
+            }
+            // Cancel any still-pending send for this same target+mediaType
+            // burst and replace it with this newer, more complete one.
+            pendingMediaSends.remove(burstKey)?.cancel(false)
+            pendingMediaSends[burstKey] = scheduledExecutor.schedule(
+                { executor.execute(task) },
+                MEDIA_BURST_QUIET_MS,
+                TimeUnit.MILLISECONDS
+            )
+        }
     }
 
     

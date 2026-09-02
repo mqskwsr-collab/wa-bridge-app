@@ -201,6 +201,36 @@ class WaSendAccessibilityService : AccessibilityService() {
         // video" (the real bubble container, matching the same "X מתוך
         // Y" pattern ALBUM_SIZE_ITEM_OF_TOTAL_REGEX already expects).
         private val MEDIA_BUBBLE_DESC_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image|צפייה בסרטון|viewing video)""", RegexOption.IGNORE_CASE)
+        // FIX (2.9.2026, tapped-cancel-button bug): real on-device log
+        // (2.9 10:32) for a 26MB/2:17 video showed the "bubble" picked by
+        // findBottommostImageViewClassed had id=com.whatsapp:id/
+        // cancel_download and desc='ביטול העברת המדיה' ("cancel media
+        // transfer") - i.e. the media was STILL DOWNLOADING FROM
+        // WHATSAPP'S SERVERS at the moment we tapped it, and this button
+        // is WhatsApp's own cancel-in-progress-download control, not a
+        // way to open/save the finished file. Tapping it almost
+        // certainly cancelled the in-progress download rather than doing
+        // anything useful - explaining why the screen right after the
+        // tap never showed a media viewer at all (still the plain chat
+        // screen) and MediaStore polling found 0/1 files for the entire
+        // 14s budget: there was never going to be a file, because the
+        // download itself never got to finish. NON_MEDIA_ICON_DESC_REGEX
+        // doesn't cover this (it's not a chrome/toolbar icon, it's the
+        // real bubble - just in an in-progress state), so it slipped
+        // through untouched. See the cancel_download check in stage 0
+        // below: this pattern is used to detect that state and wait
+        // instead of tapping.
+        private val DOWNLOAD_IN_PROGRESS_DESC_REGEX = Regex("""(ביטול העברת המדיה|ביטול הורדה|cancel (the )?(media )?(download|transfer))""", RegexOption.IGNORE_CASE)
+        // How long to keep waiting (without tapping) once a bubble is
+        // confirmed to be an active in-progress download, before giving
+        // up - large videos over a real network connection can easily
+        // take longer than the plain MEDIA_DOWNLOAD_TIMEOUT_MS budget
+        // (tuned for "already on disk, just needs a UI save") to finish.
+        // Kept a few seconds under MediaDownloadLearner's outer
+        // DOWNLOAD_WAIT_TIMEOUT_MS (65s) so this budget is always what
+        // actually expires first, with a clear, specific log message
+        // instead of the generic outer timeout firing first.
+        private const val MEDIA_IN_PROGRESS_DOWNLOAD_TIMEOUT_MS = 55000L
         // FIX (22.8.2026): the post-tap tree dump (see FIX50) confirmed
         // a REAL screen navigation happens (back/star/forward/edit/more-
         // options icons, reaction row - genuinely WhatsApp's full-screen
@@ -1259,6 +1289,31 @@ class WaSendAccessibilityService : AccessibilityService() {
                     }
                     val bubble = findBottommostImageNode(root, job.mediaType)
                     if (bubble != null) {
+                        // FIX (2.9.2026, tapped-cancel-button bug): see
+                        // DOWNLOAD_IN_PROGRESS_DESC_REGEX's doc comment.
+                        // Check BEFORE tapping - if this bubble is
+                        // WhatsApp's own "cancel in-progress download"
+                        // control, tapping it likely cancels the
+                        // download instead of opening/saving it. Widen
+                        // the budget once (large media over a real
+                        // network connection needs more than the default
+                        // "already on disk" budget) and just wait - stay
+                        // on stage 0 and re-check next poll cycle instead
+                        // of tapping. Once the real download finishes,
+                        // WhatsApp swaps this control out for the normal
+                        // viewable bubble and the code below proceeds
+                        // exactly as before.
+                        val bubbleDescForCheck = bubble.contentDescription?.toString() ?: ""
+                        val bubbleIdForCheck = bubble.viewIdResourceName ?: ""
+                        if (DOWNLOAD_IN_PROGRESS_DESC_REGEX.containsMatchIn(bubbleDescForCheck) ||
+                            bubbleIdForCheck.contains("cancel_download", ignoreCase = true)) {
+                            if (dynamicMediaDownloadTimeoutMs < MEDIA_IN_PROGRESS_DOWNLOAD_TIMEOUT_MS) {
+                                dynamicMediaDownloadTimeoutMs = MEDIA_IN_PROGRESS_DOWNLOAD_TIMEOUT_MS
+                                EventLog.log("A11y-MediaDownload: ⏳ המדיה עדיין בהורדה פעילה מוואטסאפ (נמצא כפתור ביטול הורדה, desc='$bubbleDescForCheck') - ממתין במקום ללחוץ, תקציב הורחב ל-${MEDIA_IN_PROGRESS_DOWNLOAD_TIMEOUT_MS / 1000}s")
+                            }
+                            handler.postDelayed(this, MEDIA_DOWNLOAD_POLL_INTERVAL_MS)
+                            return
+                        }
                         Log.i(TAG, "Found media bubble - tapping to force download")
                         // DIAGNOSTIC (21.8.2026): log exactly WHAT is
                         // about to be tapped - className/text/content-
