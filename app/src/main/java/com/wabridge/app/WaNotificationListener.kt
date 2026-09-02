@@ -238,6 +238,21 @@ class WaNotificationListener : NotificationListenerService() {
             return
         }
 
+        // FIX (2.9.2026, fake-contact-from-download-notification bug): see
+        // GroupDetector.hasNoMessagingStyle's doc comment. Catches system
+        // notifications (e.g. "downloading a large document" progress)
+        // whose title ISN'T literally "WhatsApp" (so the filter above
+        // misses them) but that still aren't a real per-contact/group
+        // chat message - confirmed via EventLog to be the root cause of a
+        // repeating "fake contact" being forwarded and re-sent every few
+        // seconds while a large file downloaded (title == the download's
+        // status text, text == the filename).
+        if (GroupDetector.hasNoMessagingStyle(sbn)) {
+            Log.d(TAG, "Ignoring non-chat system notification (no MessagingStyle): title='$title'")
+            EventLog.log("Listener: ⏭️ מתעלם - התראת מערכת ללא MessagingStyle (כנראה הורדת קובץ/סנכרון, לא הודעת צ'אט אמיתית) title='$title'")
+            return
+        }
+
         // FIX (23.8.2026, redundant-empty-email bug): WhatsApp always
         // fires a second, completely generic "N הודעות חדשות" / "N new
         // messages" notification alongside every real per-chat one -
