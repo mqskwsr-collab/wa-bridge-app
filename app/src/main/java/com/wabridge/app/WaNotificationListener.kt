@@ -10,10 +10,7 @@ import java.io.File
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.TimeUnit
 
 /**
  * Reads incoming WhatsApp (regular, package "com.whatsapp") notifications
@@ -148,37 +145,6 @@ class WaNotificationListener : NotificationListenerService() {
             return skip
         }
 
-        // FIX (2.9.2026, one-album-many-emails bug): the media-event
-        // dedupe above (shouldSkipMediaEvent) only ever suppressed the
-        // repeated MEDIA LOOKUP/ATTACH for a burst of notifications about
-        // the same growing album (WhatsApp reposts the album's summary
-        // text - '1 photo' -> '11 photos' -> '10 photos' -> '11 photos'
-        // again - up to half a dozen times as it syncs), but by design
-        // (see its own comment) it deliberately still let the PLAIN-TEXT
-        // POST go out for every one of those variants, to avoid ever
-        // dropping a genuinely new text message. Confirmed on-device
-        // (2.9 09:45): a single incoming 11-photo album produced 4
-        // separate emails (mediaCount 8, 3, 0, 0) because each distinct
-        // summary text was treated as its own "new message".
-        //
-        // Fix: ONLY for notifications MediaClassifier recognizes as a
-        // photo/video/voice-note summary (never for ordinary text
-        // messages - those are unaffected and still send immediately, so
-        // no risk of ever delaying/losing a real conversation message),
-        // don't POST right away. Instead debounce per target+mediaType:
-        // stash the latest title/text/phone/etc and (re)schedule a single
-        // send MEDIA_BURST_QUIET_MS after the MOST RECENT notification in
-        // the burst. Each new arrival for the same burst cancels and
-        // reschedules the pending send with the newer (larger) count/
-        // text, so only the final, most-complete version ever actually
-        // gets POSTed - and because the eventual attachMediaIfAny() call
-        // only happens once, at the end, it naturally picks up whichever
-        // files have synced to MediaStore by then instead of racing them
-        // across several partial emails.
-        private val scheduledExecutor = Executors.newSingleThreadScheduledExecutor()
-        private val pendingMediaSends = ConcurrentHashMap<String, ScheduledFuture<*>>()
-        private const val MEDIA_BURST_QUIET_MS = 4000L
-
         // FIX (19.8.2026) - media support, phase 1 (inbound only). Raw
         // file size cap before base64 (which inflates size by ~33%) -
         // keeps the encoded payload comfortably under both Apps Script's
@@ -272,18 +238,25 @@ class WaNotificationListener : NotificationListenerService() {
             return
         }
 
-        // FIX (2.9.2026, fake-contact-from-download-notification bug): see
-        // GroupDetector.hasNoMessagingStyle's doc comment. Catches system
-        // notifications (e.g. "downloading a large document" progress)
-        // whose title ISN'T literally "WhatsApp" (so the filter above
-        // misses them) but that still aren't a real per-contact/group
-        // chat message - confirmed via EventLog to be the root cause of a
-        // repeating "fake contact" being forwarded and re-sent every few
-        // seconds while a large file downloaded (title == the download's
-        // status text, text == the filename).
-        if (GroupDetector.hasNoMessagingStyle(sbn)) {
-            Log.d(TAG, "Ignoring non-chat system notification (no MessagingStyle): title='$title'")
-            EventLog.log("Listener: ⏭️ מתעלם - התראת מערכת ללא MessagingStyle (כנראה הורדת קובץ/סנכרון, לא הודעת צ'אט אמיתית) title='$title'")
+        // FIX (02.9.2026, download-progress-notification bug): WhatsApp's
+        // own "downloading a document/file" progress notification (title
+        // e.g. "הורדת מסמך מתבצעת" - locale-dependent, so not matched by
+        // string) was being treated as a real private message from a
+        // contact literally named that, with the file name being
+        // downloaded (e.g. "node-v26.8.1-x64.msi") as the "message text" -
+        // and since Android reposts it repeatedly as the download
+        // progresses, this fired off several near-simultaneous emails for
+        // what was never a chat message at all. Detected generically
+        // (works regardless of device language) via the same two signals
+        // Android itself uses for progress notifications: an EXTRA_
+        // PROGRESS/EXTRA_PROGRESS_MAX extra, or the FLAG_ONGOING_EVENT
+        // flag (progress/ongoing notifications - downloads, active calls -
+        // are non-dismissible, unlike a real incoming-message notification).
+        val hasProgressExtra = extras.containsKey(Notification.EXTRA_PROGRESS) || extras.containsKey(Notification.EXTRA_PROGRESS_MAX)
+        val isOngoing = (sbn.notification.flags and Notification.FLAG_ONGOING_EVENT) != 0
+        if (hasProgressExtra || isOngoing) {
+            Log.d(TAG, "Ignoring ongoing/progress system notification (e.g. file download in progress): title='$title'")
+            EventLog.log("Listener: ⏭️ מתעלם - התראת התקדמות/מתמשכת של המערכת (למשל הורדת קובץ): '$title'")
             return
         }
 
@@ -459,39 +432,10 @@ class WaNotificationListener : NotificationListenerService() {
         }
 
         Log.i(TAG, "WhatsApp notification: title='$outgoingTitle' text='$text' phone=$phone isGroup=$isGroup -> forwarding")
+        EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
         val postTimeMs = sbn.postTime
         val contentIntentFinal = contentIntent
-
-        // See MEDIA_BURST_QUIET_MS's doc comment above: only photo/video/
-        // voice-note summary notifications get coalesced. Plain text
-        // messages (MediaClassifier.classify == NONE) keep sending
-        // immediately, exactly as before this fix.
-        val burstMediaType = try {
-            MediaClassifier.classify(text)
-        } catch (e: Throwable) {
-            MediaClassifier.MediaType.NONE
-        }
-
-        if (burstMediaType == MediaClassifier.MediaType.NONE) {
-            EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
-            executor.execute { postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs, canonicalTarget, contentIntentFinal) }
-        } else {
-            val burstKey = "$canonicalTarget|${burstMediaType.name}"
-            EventLog.log("Listener: ⏳ הודעת מדיה - ממתין ${MEDIA_BURST_QUIET_MS}ms לפני שליחה כדי לאחד עדכונים נוספים לאותו אלבום (target='$canonicalTarget')")
-            val task = Runnable {
-                pendingMediaSends.remove(burstKey)
-                EventLog.log("Listener: ➡️ שולח ל-Apps Script (אחרי איחוד אלבום)...")
-                postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs, canonicalTarget, contentIntentFinal)
-            }
-            // Cancel any still-pending send for this same target+mediaType
-            // burst and replace it with this newer, more complete one.
-            pendingMediaSends.remove(burstKey)?.cancel(false)
-            pendingMediaSends[burstKey] = scheduledExecutor.schedule(
-                { executor.execute(task) },
-                MEDIA_BURST_QUIET_MS,
-                TimeUnit.MILLISECONDS
-            )
-        }
+        executor.execute { postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs, canonicalTarget, contentIntentFinal) }
     }
 
     
@@ -794,6 +738,16 @@ class WaNotificationListener : NotificationListenerService() {
                             // with a note that more is coming).
                             Log.i(TAG, "Media file over ${MEDIA_HARD_DROP_CAP_BYTES / (1024*1024)}MB - routing to chunked upload: ${fm.file.name} (${mb}MB)")
                             EventLog.log("Listener: 📦 קובץ מדיה גדול (${mb}MB) - יועלה בחלקים ברקע, מייל נפרד יישלח בסיום")
+                            // FIX (03.9.2026): mark this file as sent
+                            // immediately, same as the normal usable-file
+                            // path does below - otherwise, if WhatsApp
+                            // reposts the same notification again (which
+                            // it does routinely, see the dedupe logic
+                            // elsewhere in this file), the same large
+                            // file would be handed to ChunkedMediaUploader
+                            // a second time, uploading it twice and
+                            // sending two follow-up emails for one file.
+                            markSent(fm.file.absolutePath, now)
                             ChunkedMediaUploader.uploadInBackground(webAppUrl, fm.file, fm.mimeType, title, text, phone, isGroup)
                             if (droppedTooLargeNote == null) {
                                 droppedTooLargeNote = "${fm.file.name} (${mb}MB) - מועלה בחלקים, יגיע במייל נפרד"

@@ -147,7 +147,13 @@ object ChunkedMediaUploader {
             // the last chunk, a full reassembly + upload + email) on
             // the Apps Script side - give it more headroom than a
             // plain-text notification ever needed.
-            readTimeout = 60000
+            // FIX (03.9.2026): the LAST chunk triggers Code.gs to read
+            // back every chunk file, reassemble them, upload the result
+            // to Drive, and send an email - all inside that one request.
+            // 60s cut this close for a large file with many chunks;
+            // 120s gives real headroom while staying well under Apps
+            // Script's own ~6 minute execution ceiling.
+            readTimeout = 120000
         }
         try {
             OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(json) }
