@@ -21,6 +21,17 @@ object MediaClassifier {
         IMAGE,
         VIDEO,
         VOICE_NOTE,
+        // FIX (04.9.2026, mixed-album-loses-photos bug): confirmed
+        // on-device - a real album containing both photos AND a video
+        // ("11 תמונות, סרטון וידאו 1") was classified as pure VIDEO
+        // (classify() checked video keywords first and stopped there),
+        // which downstream (WaMediaLocator) meant ONLY the video's
+        // MediaStore collection (Video) was ever queried - all 11
+        // photos in the same message were never even searched for, let
+        // alone attached. A dedicated MIXED type lets callers search
+        // BOTH collections instead of picking one and silently losing
+        // the other.
+        MIXED,
         NONE
     }
 
@@ -35,13 +46,18 @@ object MediaClassifier {
         val text = Utils.stripBidiMarks(rawText).trim()
         if (text.isEmpty()) return MediaType.NONE
 
-        // Check voice/video before image: some of the emoji/keyword sets
-        // could theoretically overlap in future WhatsApp wording changes,
-        // and voice notes are the most distinctive (fewest false-positive
-        // risk), followed by video, so check in that order.
+        // Check voice first (most distinctive, fewest false-positive
+        // risk). Then check whether BOTH image and video markers are
+        // present - a mixed album, e.g. the camera emoji from the photo
+        // count PLUS "סרטון"/"video" from the video count in the same
+        // notification text - before falling back to single-type
+        // detection, so a mix never gets mistaken for one type alone.
         if (VOICE_MARKERS.any { text.contains(it, ignoreCase = true) }) return MediaType.VOICE_NOTE
-        if (VIDEO_MARKERS.any { text.contains(it, ignoreCase = true) }) return MediaType.VIDEO
-        if (IMAGE_MARKERS.any { text.contains(it, ignoreCase = true) }) return MediaType.IMAGE
+        val hasVideo = VIDEO_MARKERS.any { text.contains(it, ignoreCase = true) }
+        val hasImage = IMAGE_MARKERS.any { text.contains(it, ignoreCase = true) }
+        if (hasVideo && hasImage) return MediaType.MIXED
+        if (hasVideo) return MediaType.VIDEO
+        if (hasImage) return MediaType.IMAGE
         return MediaType.NONE
     }
 

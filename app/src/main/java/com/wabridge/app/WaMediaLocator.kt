@@ -190,6 +190,7 @@ object WaMediaLocator {
         val subfolders = when (type) {
             MediaClassifier.MediaType.IMAGE -> listOf(SUBFOLDER_IMAGES)
             MediaClassifier.MediaType.VIDEO -> listOf(SUBFOLDER_VIDEO)
+            MediaClassifier.MediaType.MIXED -> listOf(SUBFOLDER_IMAGES, SUBFOLDER_VIDEO)
             MediaClassifier.MediaType.VOICE_NOTE -> listOf(
                 SUBFOLDER_VOICE_NOTES_AUDIO_PRIVATE,
                 SUBFOLDER_VOICE_NOTES_AUDIO_SENT,
@@ -422,9 +423,19 @@ object WaMediaLocator {
         maxCount: Int,
         excludePaths: Set<String>
     ): List<FoundMedia> {
-        val collection = when (type) {
-            MediaClassifier.MediaType.IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-            MediaClassifier.MediaType.VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        // FIX (04.9.2026, mixed-album bug): a MIXED-classified message
+        // (photos + video in one notification) needs BOTH the Images
+        // and Video MediaStore collections queried and merged - a
+        // single `collection` here used to mean the other type's files
+        // were never even searched for. Other types keep querying
+        // exactly one collection, unchanged.
+        val collections = when (type) {
+            MediaClassifier.MediaType.IMAGE -> listOf(MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+            MediaClassifier.MediaType.VIDEO -> listOf(MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+            MediaClassifier.MediaType.MIXED -> listOf(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            )
             else -> return emptyList()
         }
 
@@ -477,35 +488,38 @@ object WaMediaLocator {
         // cursor for a genuinely different photo instead of stopping at
         // maxCount rows.
         val seenBaseNames = mutableSetOf<String>()
-        try {
-            val cursor: Cursor? = context.contentResolver.query(
-                collection, projection, selection, selectionArgs, sortOrder
-            )
-            cursor?.use {
-                val dataCol = it.getColumnIndex(MediaStore.MediaColumns.DATA)
-                val nameCol = it.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
-                while (it.moveToNext() && results.size < maxCount) {
-                    val path = if (dataCol >= 0) it.getString(dataCol) else null
-                    val name = if (nameCol >= 0) it.getString(nameCol) else null
-                    if (path == null || path in excludePaths) continue
-                    if (!seenPaths.add(path)) continue
-                    val file = File(path)
-                    if (!file.isFile) continue
-                    val baseName = stripDuplicateSuffix(file.name)
-                    if (!seenBaseNames.add(baseName)) {
-                        EventLog.log("Media: 🔁 מדלג - '${file.name}' נראה כשמירה חוזרת של תוכן שכבר נמצא (אותו שם בסיס: '$baseName')")
-                        continue
+        for (collection in collections) {
+            if (results.size >= maxCount) break
+            try {
+                val cursor: Cursor? = context.contentResolver.query(
+                    collection, projection, selection, selectionArgs, sortOrder
+                )
+                cursor?.use {
+                    val dataCol = it.getColumnIndex(MediaStore.MediaColumns.DATA)
+                    val nameCol = it.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                    while (it.moveToNext() && results.size < maxCount) {
+                        val path = if (dataCol >= 0) it.getString(dataCol) else null
+                        val name = if (nameCol >= 0) it.getString(nameCol) else null
+                        if (path == null || path in excludePaths) continue
+                        if (!seenPaths.add(path)) continue
+                        val file = File(path)
+                        if (!file.isFile) continue
+                        val baseName = stripDuplicateSuffix(file.name)
+                        if (!seenBaseNames.add(baseName)) {
+                            EventLog.log("Media: 🔁 מדלג - '${file.name}' נראה כשמירה חוזרת של תוכן שכבר נמצא (אותו שם בסיס: '$baseName')")
+                            continue
+                        }
+                        results.add(FoundMedia(file, guessMimeType(file.name)))
+                        EventLog.log("Media: ✅ נמצא קובץ נוסף דרך MediaStore (${results.size}/$maxCount): ${name ?: file.name}")
                     }
-                    results.add(FoundMedia(file, guessMimeType(file.name)))
-                    EventLog.log("Media: ✅ נמצא קובץ נוסף דרך MediaStore (${results.size}/$maxCount): ${name ?: file.name}")
                 }
+            } catch (e: Exception) {
+                Log.w(TAG, "MediaStore multi-query failed", e)
+                EventLog.log("Media: 🔎 שאילתת MediaStore (ריבוי) נכשלה: ${e.javaClass.simpleName}: ${e.message}")
             }
-            if (results.isEmpty()) {
-                EventLog.log("Media: 🔎 אבחון - שאילתת MediaStore (ריבוי) לא מצאה תוצאה בחלון הזמן (${minSec}-${maxSec})")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "MediaStore multi-query failed", e)
-            EventLog.log("Media: 🔎 שאילתת MediaStore (ריבוי) נכשלה: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        if (results.isEmpty()) {
+            EventLog.log("Media: 🔎 אבחון - שאילתת MediaStore (ריבוי) לא מצאה תוצאה בחלון הזמן (${minSec}-${maxSec})")
         }
         return results
     }

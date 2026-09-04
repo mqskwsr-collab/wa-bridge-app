@@ -2099,7 +2099,7 @@ class WaSendAccessibilityService : AccessibilityService() {
      */
     private fun findBottommostImageNode(root: AccessibilityNodeInfo, mediaType: MediaClassifier.MediaType): AccessibilityNodeInfo? {
         findNodeByDescription(root)?.let { return it }
-        if (mediaType != MediaClassifier.MediaType.IMAGE && mediaType != MediaClassifier.MediaType.VIDEO) {
+        if (mediaType != MediaClassifier.MediaType.IMAGE && mediaType != MediaClassifier.MediaType.VIDEO && mediaType != MediaClassifier.MediaType.MIXED) {
             EventLog.log("A11y-MediaDownload: ⚠️ סוג המדיה (${mediaType.name}) עדיין לא נתמך לאיתור בועה אמין - מדלג במקום לנחש")
             return null
         }

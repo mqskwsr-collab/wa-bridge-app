@@ -10,7 +10,10 @@ import java.io.File
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 
 /**
  * Reads incoming WhatsApp (regular, package "com.whatsapp") notifications
@@ -128,6 +131,32 @@ class WaNotificationListener : NotificationListenerService() {
             recentlySentFiles[path] = now
         }
 
+        // FIX (04.9.2026, "don't send until ready" request): a cheap,
+        // bounded check that a file's size has stopped changing before
+        // treating it as complete - guards against starting a
+        // minutes-long chunked upload against bytes WhatsApp is still
+        // actively writing. Checks a few times with a short pause
+        // between each; returns true as soon as two consecutive reads
+        // agree (and the file is non-empty), false if it never settles
+        // within the budget (caller still proceeds either way, just logs
+        // a warning - see call site - since refusing to ever send isn't
+        // better than sending a possibly-still-growing file).
+        private fun waitForStableFileSize(file: File, maxChecks: Int = 6, intervalMs: Long = 500L): Boolean {
+            var previousSize = -1L
+            repeat(maxChecks) {
+                val currentSize = file.length()
+                if (currentSize > 0 && currentSize == previousSize) return true
+                previousSize = currentSize
+                try {
+                    Thread.sleep(intervalMs)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return false
+                }
+            }
+            return false
+        }
+
         /**
          * Atomically checks whether [key] (target+mediaType) was already
          * processed within MEDIA_EVENT_DEDUPE_WINDOW_MS and, if not,
@@ -156,15 +185,28 @@ class WaNotificationListener : NotificationListenerService() {
         // FIX (24.8.2026, large-media-as-Drive-link): previously files
         // over MEDIA_SIZE_CAP_BYTES were dropped entirely with no way for
         // the recipient to ever get them. Now MEDIA_SIZE_CAP_BYTES is the
-        // threshold for a DIRECT Gmail attachment (unchanged); files
-        // between that and this higher hard ceiling are still sent (their
-        // base64 bytes included) but flagged "tooLargeToAttachDirectly"
-        // so Code.gs uploads them to Drive and puts a share link in the
-        // email body instead of attaching them. Only files bigger than
-        // THIS are truly dropped - kept generous but still comfortably
-        // under Apps Script's doPost payload ceiling even after base64's
-        // ~37% size inflation.
-        private const val MEDIA_HARD_DROP_CAP_BYTES = 30L * 1024 * 1024 // 30MB
+        // threshold for a DIRECT Gmail attachment (unchanged).
+        // FIX (04.9.2026, large-file-timeout bug): files between the old
+        // 12MB/30MB thresholds used to still go out as a Drive-link
+        // through the SAME single request as the rest of the message
+        // (base64-embedded, one big POST) with only a 30s readTimeout -
+        // confirmed on-device to fail with SocketTimeoutException for a
+        // real 25MB video, which is squarely in that range: encoding +
+        // transmitting + the server's own Drive-write easily exceeds 30s
+        // on an ordinary mobile connection. Rather than just raising that
+        // timeout (a single giant request stays inherently fragile - one
+        // dropped packet anywhere kills the whole multi-MB transfer),
+        // MEDIA_HARD_DROP_CAP_BYTES now equals MEDIA_SIZE_CAP_BYTES: ANY
+        // file too big to attach directly goes straight to
+        // ChunkedMediaUploader instead of ever taking the fragile
+        // single-request path - small 6MB pieces, each with its own
+        // generous 120s timeout (see ChunkedMediaUploader.kt), which is
+        // both more reliable and exactly matches "don't send until the
+        // file is actually ready, deliver it as a Drive link" - the
+        // upload only starts once the whole file is confirmed on disk
+        // (see the size-stability check in attachMediaIfAny below), and
+        // Code.gs already emails the Drive link once every chunk lands.
+        private const val MEDIA_HARD_DROP_CAP_BYTES = MEDIA_SIZE_CAP_BYTES
 
         // FIX (02.9.2026, chunked upload for files over 30MB): a file
         // over MEDIA_HARD_DROP_CAP_BYTES is no longer just dropped - up
@@ -177,9 +219,32 @@ class WaNotificationListener : NotificationListenerService() {
         // the background. MUST match CHUNK_UPLOAD_ABSOLUTE_MAX_BYTES in
         // Code.gs.
         private const val CHUNK_UPLOAD_ABSOLUTE_MAX_BYTES = 150L * 1024 * 1024 // 150MB
+
+        // How long to wait, after the most recent media-classified
+        // notification for a sender, before actually sending - see the
+        // pendingMediaSends doc comment below for why.
+        private const val MEDIA_BURST_QUIET_MS = 4000L
     }
 
     private val executor = Executors.newSingleThreadExecutor()
+
+    // FIX (04.9.2026, re-applied - see history): coalesces a burst of
+    // media (photo/video/voice) notification updates about the SAME
+    // evolving album/attachment from one sender into a single email,
+    // instead of one email per notification-text variant. Two prior
+    // pitfalls, both avoided this time:
+    //   1) an earlier version keyed by "target|mediaType", which split
+    //      one message into two emails the moment its text crossed a
+    //      MediaClassifier type boundary mid-burst (e.g. "11 photos" ->
+    //      "11 photos, 1 video"). Fixed by keying on target ALONE - see
+    //      burstKey below.
+    //   2) this mechanism was entirely missing from a later commit that
+    //      reimplemented the unrelated progress-notification fix from an
+    //      older base and didn't carry it forward - restored here, on
+    //      top of that commit's own (good, unrelated) large-file
+    //      chunked-upload fixes, which are untouched.
+    private val scheduledExecutor = Executors.newSingleThreadScheduledExecutor()
+    private val pendingMediaSends = ConcurrentHashMap<String, ScheduledFuture<*>>()
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         try {
@@ -238,27 +303,37 @@ class WaNotificationListener : NotificationListenerService() {
             return
         }
 
-        // FIX (02.9.2026, download-progress-notification bug): WhatsApp's
-        // own "downloading a document/file" progress notification (title
-        // e.g. "הורדת מסמך מתבצעת" - locale-dependent, so not matched by
-        // string) was being treated as a real private message from a
-        // contact literally named that, with the file name being
-        // downloaded (e.g. "node-v26.8.1-x64.msi") as the "message text" -
-        // and since Android reposts it repeatedly as the download
-        // progresses, this fired off several near-simultaneous emails for
-        // what was never a chat message at all. Detected generically
-        // (works regardless of device language) via the same two signals
-        // Android itself uses for progress notifications: an EXTRA_
-        // PROGRESS/EXTRA_PROGRESS_MAX extra, or the FLAG_ONGOING_EVENT
-        // flag (progress/ongoing notifications - downloads, active calls -
-        // are non-dismissible, unlike a real incoming-message notification).
-        val hasProgressExtra = extras.containsKey(Notification.EXTRA_PROGRESS) || extras.containsKey(Notification.EXTRA_PROGRESS_MAX)
-        val isOngoing = (sbn.notification.flags and Notification.FLAG_ONGOING_EVENT) != 0
-        if (hasProgressExtra || isOngoing) {
-            Log.d(TAG, "Ignoring ongoing/progress system notification (e.g. file download in progress): title='$title'")
-            EventLog.log("Listener: ⏭️ מתעלם - התראת התקדמות/מתמשכת של המערכת (למשל הורדת קובץ): '$title'")
+        // FIX (04.9.2026, real-video-messages-silently-dropped bug):
+        // the previous approach here (checking Notification.EXTRA_
+        // PROGRESS/EXTRA_PROGRESS_MAX/FLAG_ONGOING_EVENT) was confirmed
+        // on-device to false-positive on GENUINE incoming video message
+        // notifications - WhatsApp apparently marks a video notification
+        // as "ongoing" while its thumbnail/preview is prepared, which is
+        // indistinguishable from a real file-download system toast using
+        // only those flags. Real transcript (4.9 07:56): an actual "🎥
+        // וידאו (2:17)" message from a real contact was matched by this
+        // check and silently dropped four times in a row - no email ever
+        // went out for it at all. That's strictly worse than the
+        // original bug this was meant to fix (which merely duplicated
+        // messages; this loses them).
+        //
+        // Reverted to the earlier, on-device-proven-safe signal instead:
+        // GroupDetector.hasNoMessagingStyle. A genuine per-contact/group
+        // WhatsApp message ALWAYS arrives as a MessagingStyle
+        // notification (that's the same mechanism isGroupConversation()
+        // and PersonPhoneExtractor already rely on elsewhere in this
+        // file) - a plain system toast (download/sync progress) never
+        // does. This never misfired on any real message in testing,
+        // including video ones, because MessagingStyle presence tracks
+        // "is this genuinely a chat notification" directly, instead of
+        // guessing from flags that Android also sets on legitimate
+        // message notifications for unrelated reasons.
+        if (GroupDetector.hasNoMessagingStyle(sbn)) {
+            Log.d(TAG, "Ignoring non-chat system notification (no MessagingStyle): title='$title'")
+            EventLog.log("Listener: ⏭️ מתעלם - התראת מערכת ללא MessagingStyle (כנראה הורדת קובץ/סנכרון, לא הודעת צ'אט אמיתית) title='$title'")
             return
         }
+
 
         // FIX (23.8.2026, redundant-empty-email bug): WhatsApp always
         // fires a second, completely generic "N הודעות חדשות" / "N new
@@ -432,10 +507,39 @@ class WaNotificationListener : NotificationListenerService() {
         }
 
         Log.i(TAG, "WhatsApp notification: title='$outgoingTitle' text='$text' phone=$phone isGroup=$isGroup -> forwarding")
-        EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
         val postTimeMs = sbn.postTime
         val contentIntentFinal = contentIntent
-        executor.execute { postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs, canonicalTarget, contentIntentFinal) }
+
+        // Only photo/video/voice-note summary notifications get
+        // coalesced (see pendingMediaSends doc comment above). Plain
+        // text messages keep sending immediately - unaffected, no risk
+        // of ever delaying/losing a real conversation message.
+        val burstMediaType = try {
+            MediaClassifier.classify(text)
+        } catch (e: Throwable) {
+            MediaClassifier.MediaType.NONE
+        }
+
+        if (burstMediaType == MediaClassifier.MediaType.NONE) {
+            EventLog.log("Listener: ➡️ שולח ל-Apps Script...")
+            executor.execute { postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs, canonicalTarget, contentIntentFinal) }
+        } else {
+            val burstKey = canonicalTarget
+            EventLog.log("Listener: ⏳ הודעת מדיה - ממתין ${MEDIA_BURST_QUIET_MS}ms לפני שליחה כדי לאחד עדכונים נוספים לאותו אלבום (target='$canonicalTarget')")
+            val task = Runnable {
+                pendingMediaSends.remove(burstKey)
+                EventLog.log("Listener: ➡️ שולח ל-Apps Script (אחרי איחוד אלבום)...")
+                postToAppsScript(webAppUrl, outgoingTitle, text, phone, isGroup, postTimeMs, canonicalTarget, contentIntentFinal)
+            }
+            // Cancel any still-pending send for this same target and
+            // replace it with this newer, more complete one.
+            pendingMediaSends.remove(burstKey)?.cancel(false)
+            pendingMediaSends[burstKey] = scheduledExecutor.schedule(
+                { executor.execute(task) },
+                MEDIA_BURST_QUIET_MS,
+                TimeUnit.MILLISECONDS
+            )
+        }
     }
 
     
@@ -729,6 +833,21 @@ class WaNotificationListener : NotificationListenerService() {
                     fm.file.length() > MEDIA_HARD_DROP_CAP_BYTES -> {
                         val mb = fm.file.length() / (1024 * 1024)
                         if (fm.file.length() <= CHUNK_UPLOAD_ABSOLUTE_MAX_BYTES) {
+                            // FIX (04.9.2026, "don't send until the file
+                            // is ready" request): confirm the file's size
+                            // has actually stopped changing before handing
+                            // it off - WhatsApp can still be writing a
+                            // just-downloaded large video to disk for a
+                            // moment after it first appears in MediaStore,
+                            // and starting the (minutes-long) chunked
+                            // upload against a half-written file would
+                            // either truncate it or waste a full upload
+                            // cycle on stale bytes. Cheap and bounded -
+                            // see waitForStableFileSize's doc comment.
+                            if (!waitForStableFileSize(fm.file)) {
+                                Log.w(TAG, "File size never stabilized, uploading anyway: ${fm.file.name}")
+                                EventLog.log("Listener: ⚠️ גודל הקובץ ${fm.file.name} לא התייצב אחרי כמה בדיקות - ממשיך להעלות בכל זאת")
+                            }
                             // FIX (02.9.2026): instead of dropping this
                             // file, hand it to ChunkedMediaUploader,
                             // which sends it to Code.gs in small pieces
@@ -809,6 +928,13 @@ class WaNotificationListener : NotificationListenerService() {
             // out of this function entirely now.
             val attachments = usable.map { fm ->
                 markSent(fm.file.absolutePath, now)
+                // Effectively always false now that MEDIA_HARD_DROP_CAP_
+                // BYTES == MEDIA_SIZE_CAP_BYTES (see that constant's doc
+                // comment) - anything bigger already went to
+                // ChunkedMediaUploader above and never reaches `usable`.
+                // Left in place rather than removed: harmless, and keeps
+                // this function correct on its own if the two constants
+                // are ever tuned apart again later.
                 val tooLargeToAttachDirectly = fm.file.length() > MEDIA_SIZE_CAP_BYTES
                 val sizeLabel = if (tooLargeToAttachDirectly) "${fm.file.length() / 1024}KB, יעלה כקישור Drive" else "${fm.file.length() / 1024}KB"
                 EventLog.log("Listener: 📎 מצרף קובץ מדיה: ${fm.file.name} ($sizeLabel)")
