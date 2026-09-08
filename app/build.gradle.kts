@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 42
-        versionName = "0.42-fix42-large-file-swallows-own-email"
+        versionCode = 43
+        versionName = "0.43-fix43-log-installed-version"
     }
 
     buildTypes {

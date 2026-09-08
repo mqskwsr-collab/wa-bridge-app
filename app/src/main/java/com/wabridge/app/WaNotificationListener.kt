@@ -977,6 +977,31 @@ class WaNotificationListener : NotificationListenerService() {
         listenerConnectedAtMs = System.currentTimeMillis()
         Log.i(TAG, "Notification listener connected")
         EventLog.log("Listener: 🔌 שירות ההאזנה להתראות התחבר")
+        // FIX (09.9.2026, "which build is actually installed?" bug-
+        // hunting aid): several rounds of on-device logs looked
+        // identical to pre-fix behavior even after the person believed
+        // they had installed an updated APK, with no way to tell from
+        // the log alone whether the old build was simply still running.
+        // Logging the app's own version here, every single time the
+        // listener connects (which happens on every boot/reinstall/
+        // re-enable), makes that unambiguous going forward instead of
+        // inferring it indirectly from which log lines are present.
+        logInstalledAppVersion()
+    }
+
+    private fun logInstalledAppVersion() {
+        try {
+            val pkgInfo = packageManager.getPackageInfo(packageName, 0)
+            @Suppress("DEPRECATION")
+            val versionCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                pkgInfo.longVersionCode
+            } else {
+                pkgInfo.versionCode.toLong()
+            }
+            EventLog.log("Listener: ℹ️ גרסת אפליקציה מותקנת: ${pkgInfo.versionName} (versionCode=$versionCode)")
+        } catch (e: Exception) {
+            EventLog.log("Listener: ⚠️ לא הצלחתי לקרוא את מספר הגרסה של האפליקציה: $e")
+        }
     }
 
     override fun onListenerDisconnected() {
