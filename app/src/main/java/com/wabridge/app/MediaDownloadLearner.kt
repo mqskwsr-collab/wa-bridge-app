@@ -40,16 +40,42 @@ object MediaDownloadLearner {
      * was skipped entirely (another flow was already running, or no
      * contentIntent/chat was available) or timed out.
      */
-    fun triggerDownloadAndWait(context: Context, target: String, mediaType: MediaClassifier.MediaType, contentIntent: PendingIntent?): Boolean {
-        if (contentIntent == null) return false
+    // FIX (08.9.2026): a real transcript showed PhoneLearnCoordinator
+    // grabbing its lock in the SAME second as a media-download attempt
+    // for the same incoming message (both triggered off the same
+    // notification - phone-learning fires for any new contact,
+    // regardless of message type) - the old instant-bail-out here
+    // meant the photo was silently never attached, even though
+    // PhoneLearn itself finished about a second later. Instead of
+    // giving up the instant any other coordinator happens to be busy,
+    // poll for up to OTHER_FLOW_WAIT_TIMEOUT_MS for them to free up -
+    // phone/group-link learning normally completes in 1-3s, so this
+    // usually costs nothing observable and lets the real download
+    // proceed instead of losing the attachment. Only after that whole
+    // window is still busy do we fall back to the original skip.
+    private const val OTHER_FLOW_WAIT_TIMEOUT_MS = 8000L
+    private const val OTHER_FLOW_POLL_INTERVAL_MS = 250L
 
-        if (MediaDownloadCoordinator.hasPendingDownload() ||
+    private fun anyOtherFlowBusy(): Boolean =
+        MediaDownloadCoordinator.hasPendingDownload() ||
             PhoneLearnCoordinator.hasPendingLearn() ||
             LearnCoordinator.hasPendingLearn() ||
             SendCoordinator.hasPendingJob()
-        ) {
-            Log.d(TAG, "Skipping media-download trigger for '$target' - another flow already in progress")
-            EventLog.log("MediaDownload: ⏭️ תהליך אחר כבר רץ, מדלג על הכרחת הורדה עבור '$target'")
+
+    fun triggerDownloadAndWait(context: Context, target: String, mediaType: MediaClassifier.MediaType, contentIntent: PendingIntent?): Boolean {
+        if (contentIntent == null) return false
+
+        if (anyOtherFlowBusy()) {
+            EventLog.log("MediaDownload: ⏳ תהליך אחר רץ כרגע עבור '$target' - ממתין עד ${OTHER_FLOW_WAIT_TIMEOUT_MS}ms שיתפנה")
+            val waitDeadline = System.currentTimeMillis() + OTHER_FLOW_WAIT_TIMEOUT_MS
+            while (anyOtherFlowBusy() && System.currentTimeMillis() < waitDeadline) {
+                Thread.sleep(OTHER_FLOW_POLL_INTERVAL_MS)
+            }
+        }
+
+        if (anyOtherFlowBusy()) {
+            Log.d(TAG, "Skipping media-download trigger for '$target' - another flow still in progress after waiting")
+            EventLog.log("MediaDownload: ⏭️ תהליך אחר עדיין רץ אחרי ההמתנה, מדלג על הכרחת הורדה עבור '$target'")
             return false
         }
 
