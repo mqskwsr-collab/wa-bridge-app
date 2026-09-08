@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 41
-        versionName = "0.41-fix41-media-launcher-mistap-and-video-truncation"
+        versionCode = 42
+        versionName = "0.42-fix42-large-file-swallows-own-email"
     }
 
     buildTypes {

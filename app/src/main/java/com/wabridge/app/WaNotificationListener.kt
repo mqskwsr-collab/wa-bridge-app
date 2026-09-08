@@ -823,10 +823,30 @@ class WaNotificationListener : NotificationListenerService() {
             // here - they're routed to Drive-link instead of a direct
             // attachment further down, not dropped.
             var droppedTooLargeNote: String? = null
+            // FIX (08.9.2026, large-file-swallows-own-email bug): a real
+            // on-device log showed a lone 24MB video get routed to
+            // chunked upload (which calls markSent() immediately on this
+            // exact file, right below, so a reposted notification for
+            // the same file doesn't trigger a second upload) - and then,
+            // moments later in the SAME pass, the "did every found file
+            // turn out to be an already-sent duplicate" check below read
+            // wasRecentlySent() on that very file and saw it as TRUE,
+            // because THIS pass had just marked it, not because any
+            // earlier job ever actually sent it. That misclassified a
+            // brand-new large video as "just a stale repost of an
+            // already-delivered album" and suppressed the entire
+            // notification (droppedTooLargeNote included), even though
+            // the background chunked upload really was just kicked off
+            // and a real user was waiting for any confirmation at all.
+            // Snapshotting each file's sent-state BEFORE this pass runs
+            // (i.e. before any markSent() call below can taint it) means
+            // the post-filter check only ever reflects genuinely earlier
+            // jobs, never this one's own side effects.
+            val alreadySentBeforeThisPass = found.associate { it.file.absolutePath to wasRecentlySent(it.file.absolutePath, now) }
             val usable = found.filter { fm ->
                 val path = fm.file.absolutePath
                 when {
-                    wasRecentlySent(path, now) -> {
+                    alreadySentBeforeThisPass[path] == true -> {
                         EventLog.log("Listener: ⏭️ מדלג - קובץ זה כבר נשלח לאחרונה: ${fm.file.name}")
                         false
                     }
@@ -901,7 +921,7 @@ class WaNotificationListener : NotificationListenerService() {
                 // information, so the whole email is suppressed rather
                 // than going out empty with a misleading "2 תמונות"-style
                 // body and mediaCount:0.
-                val allFilteredWereAlreadySent = found.all { wasRecentlySent(it.file.absolutePath, now) }
+                val allFilteredWereAlreadySent = found.all { alreadySentBeforeThisPass[it.file.absolutePath] == true }
                 if (allFilteredWereAlreadySent) {
                     EventLog.log("Listener: ⏭️ מדלג על שליחה כולה - כל ${found.size} הקבצים שנמצאו כבר נשלחו לאחרונה (התראה חוזרת/מתעדכנת עבור אותו אלבום)")
                     return AttachResult(emptyList(), skipEntireSend = true)
