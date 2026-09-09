@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 44
-        versionName = "0.44-fix44-mixed-album-video-stability-and-cross-target-mismatch"
+        versionCode = 45
+        versionName = "0.45-fix45-chunk-upload-byte-diagnostics"
     }
 
     buildTypes {
