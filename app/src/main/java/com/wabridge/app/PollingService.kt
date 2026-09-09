@@ -116,7 +116,7 @@ class PollingService : Service() {
                     Log.w(TAG, "No Web App URL configured - stopping poll loop")
                     break
                 }
-                val check = httpGet("$webAppUrl?action=check")
+                val check = httpGet(UrlUtil.appendParam(webAppUrl, "action=check"))
                 val json = JSONObject(check)
                 if (json.optBoolean("found", false)) {
                     if (processingLock.compareAndSet(false, true)) {
@@ -223,7 +223,7 @@ class PollingService : Service() {
                 Log.i(TAG, "Sent directly via notification reply action for row $rowNumber")
                 EventLog.log("Poll: ⚡ נשלח מיידית דרך פעולת התשובה של ההתראה (בלי לפתוח וואטסאפ בכלל)")
                 try {
-                    httpGet("$webAppUrl?action=markSent&row=$rowNumber")
+                    httpGet(UrlUtil.appendParam(webAppUrl, "action=markSent&row=$rowNumber"))
                 } catch (e: Exception) {
                     Log.e(TAG, "markSent call failed for row $rowNumber", e)
                     EventLog.log("Poll: ⚠️ markSent נכשל: ${e.message}")
@@ -328,7 +328,7 @@ class PollingService : Service() {
             Log.i(TAG, "Send confirmed for row $rowNumber - calling markSent")
             EventLog.log("Poll: ✅ נשלח בהצלחה, מעדכן markSent")
             try {
-                httpGet("$webAppUrl?action=markSent&row=$rowNumber")
+                httpGet(UrlUtil.appendParam(webAppUrl, "action=markSent&row=$rowNumber"))
             } catch (e: Exception) {
                 Log.e(TAG, "markSent call failed for row $rowNumber", e)
                 EventLog.log("Poll: ⚠️ markSent נכשל: ${e.message}")

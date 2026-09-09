@@ -137,7 +137,7 @@ object PhoneLearnLearner {
     /** See GroupLinkLearner.checkTargetAlreadyKnown - identical purpose, applied to private contacts. */
     private fun checkTargetAlreadyKnown(webAppUrl: String, target: String): Boolean {
         return try {
-            val url = "$webAppUrl?action=lookupTarget&target=" + URLEncoder.encode(target, "UTF-8")
+            val url = UrlUtil.appendParam(webAppUrl, "action=lookupTarget&target=" + URLEncoder.encode(target, "UTF-8"))
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 10000
@@ -157,7 +157,7 @@ object PhoneLearnLearner {
 
     private fun reportLearnedPhone(webAppUrl: String, target: String, phone: String) {
         try {
-            val url = "$webAppUrl?action=savePhone" +
+            val url = UrlUtil.appendParam(webAppUrl, "action=savePhone") +
                 "&target=" + URLEncoder.encode(target, "UTF-8") +
                 "&phone=" + URLEncoder.encode(phone, "UTF-8")
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
