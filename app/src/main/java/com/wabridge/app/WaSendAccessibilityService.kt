@@ -1943,16 +1943,33 @@ class WaSendAccessibilityService : AccessibilityService() {
                     // two consecutive ~1s poll cycles before it's
                     // trusted as finished; any growth resets the count
                     // and we simply wait another cycle.
-                    val stabilityConfirmed = if (job.mediaType == MediaClassifier.MediaType.VIDEO) {
-                        found.isNotEmpty() && found.all { fm ->
+                    // FIX (09.9.2026, mixed-album video still not
+                    // protected): scoping the check above to `job.
+                    // mediaType == VIDEO` missed the very common case of
+                    // a MIXED album (photo + video together) - confirmed
+                    // on-device: a 2-item MIXED album's video component
+                    // only survived intact because swiping to the 2nd
+                    // item happened to burn enough extra time for
+                    // WhatsApp to finish writing it anyway, not because
+                    // this check protected it. A MIXED job's mediaType
+                    // is "MIXED", never "VIDEO", so the old per-job check
+                    // silently never applied to it. Now checks each
+                    // found item's own mimeType instead of the overall
+                    // job type, so a video is protected whether it's a
+                    // lone VIDEO job or one item inside a MIXED album -
+                    // non-video items (photos) are still considered
+                    // stable immediately, same as before.
+                    val stabilityConfirmed = found.all { fm ->
+                        val isVideoFile = fm.mimeType.startsWith("video/", ignoreCase = true)
+                        if (!isVideoFile) {
+                            true
+                        } else {
                             val path = fm.file.absolutePath
                             val currentLen = fm.file.length()
                             val previousLen = lastKnownFileSizes[path]
                             lastKnownFileSizes[path] = currentLen
                             previousLen != null && previousLen == currentLen && currentLen > 0L
                         }
-                    } else {
-                        true
                     }
                     val remainingBudgetMs = dynamicMediaDownloadTimeoutMs - (System.currentTimeMillis() - mediaDownloadStartTime)
                     val mustBackOutNow = found.isNotEmpty() && remainingBudgetMs < 2500L
