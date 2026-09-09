@@ -95,6 +95,11 @@ class WaSendAccessibilityService : AccessibilityService() {
         private val SEARCH_ICON_REGEX = Regex("""(חיפוש|search)""", RegexOption.IGNORE_CASE)
         private const val MAX_TAP_ATTEMPTS = 8
         private const val LEARN_TIMEOUT_MS = 18000L
+        // FIX (08.9.2026, launcher-mistap bug): used to guard against
+        // acting on a stale rootInActiveWindow that still belongs to
+        // whatever was on screen before WhatsApp's chat activity finished
+        // transitioning in - see the stage -1 doc comment below.
+        private const val WHATSAPP_PACKAGE_NAME = "com.whatsapp"
         private const val MEDIA_DOWNLOAD_TIMEOUT_MS = 14000L
         // FIX (23.8.2026, full-album swipe): a multi-image album needs
         // far more than the single-image budget above - one swipe +
@@ -163,6 +168,18 @@ class WaSendAccessibilityService : AccessibilityService() {
         // the "show all" form - actually more so, since it's on the
         // EXACT bubble being tapped rather than a sibling summary bubble.
         private val ALBUM_SIZE_ITEM_OF_TOTAL_REGEX = Regex("""(?:מתוך|of)\s*(\d+)""", RegexOption.IGNORE_CASE)
+        // FIX (08.9.2026, truncated-video bug): a video's own bubble
+        // content-description states its real duration up front (e.g.
+        // "‏סרטון,  באורך 137 שניות" / "video, 137 seconds long") -
+        // confirmed in the same on-device log that showed the
+        // truncation bug. Now that stage 1 waits for real file-size
+        // stability instead of backing out the instant a file exists
+        // (see stabilityConfirmed below), a long video genuinely needs
+        // proportionally more time budget to finish downloading before
+        // the outer timeout gives up on it - this lets that budget scale
+        // with the video's own stated length instead of only with album
+        // photo count.
+        private val VIDEO_DURATION_IN_DESC_REGEX = Regex("""(?:באורך|length)\s*(\d+)\s*(?:שניות|seconds)""", RegexOption.IGNORE_CASE)
         // FIX (25.8.2026, duplicate-resave bug): matches the "(N)" suffix
         // Android appends to avoid a filename collision - see
         // stripDuplicateSuffix's doc comment.
@@ -479,6 +496,13 @@ class WaSendAccessibilityService : AccessibilityService() {
     // this to reach MIN_POLL_CYCLES_BEFORE_SWIPE first, giving each item
     // a genuine chance to download before giving up on it.
     private var pollCyclesOnCurrentItem = 0
+    // FIX (08.9.2026, truncated-video bug): path -> last-seen length(),
+    // used to confirm a video file's size has genuinely stopped growing
+    // before trusting it as a finished download - see the stage 1 doc
+    // comment where this is read/written. Cleared on every new
+    // startDownload so a stale size from an earlier, unrelated video can
+    // never be mistaken for "unchanged" on a completely different file.
+    private val lastKnownFileSizes = mutableMapOf<String, Long>()
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
@@ -567,6 +591,7 @@ class WaSendAccessibilityService : AccessibilityService() {
             consecutiveSwipesWithNoGrowth = 0
             currentViewerBounds = null
             pollCyclesOnCurrentItem = 0
+            lastKnownFileSizes.clear()
             handler.post(mediaDownloadRunnable)
         }
     }
@@ -1257,9 +1282,49 @@ class WaSendAccessibilityService : AccessibilityService() {
                         mediaDownloadStage = 0
                         handler.postDelayed(this, 900L)
                     } else {
+                        // FIX (08.9.2026, launcher-mistap bug): a real
+                        // on-device log (08.9 05:20, image download)
+                        // showed the click target chosen right after
+                        // this branch was com.android.launcher3:id/
+                        // cl_search - the HOME SCREEN's search bar, not
+                        // anything in WhatsApp at all. rootInActiveWindow
+                        // can lag behind the actual foreground app for a
+                        // short moment during the app-launch transition
+                        // triggered by opening the chat, so "no jump
+                        // button found" here doesn't reliably mean
+                        // "already scrolled to bottom" - it can equally
+                        // mean "this root isn't WhatsApp's chat screen
+                        // yet at all", and the old code fell straight
+                        // through to stage 0's search on the very next
+                        // tick either way. That one instant, uncontrolled
+                        // hop from a still-transitioning window into a
+                        // scan-and-tap step is exactly what let a
+                        // launcher element get picked and clicked. Now
+                        // requires root.packageName to actually be
+                        // WhatsApp before treating "no jump button" as
+                        // "ready" - if it isn't yet, this just waits and
+                        // rechecks on the next tick (bounded by the
+                        // outer timeout as always) instead of guessing.
+                        val rootPkg = root.packageName?.toString()
+                        if (rootPkg != WHATSAPP_PACKAGE_NAME) {
+                            if (elapsed - lastMediaDownloadDumpTime > 2000L) {
+                                lastMediaDownloadDumpTime = elapsed
+                                EventLog.log("A11y-MediaDownload: ⏳ [+${elapsed / 1000}s] ה-root הנוכחי עדיין לא של וואטסאפ (package='$rootPkg') - ממתין למעבר המסך להסתיים")
+                            }
+                            handler.postDelayed(this, SEARCH_INTERVAL_MS)
+                            return
+                        }
+                        // FIX (08.9.2026, same bug): even once the root
+                        // genuinely belongs to WhatsApp, a freshly-drawn
+                        // screen can still be mid-layout for a brief
+                        // moment right after the transition - give it
+                        // the same short settle window the jump-button
+                        // branch above already gets (900ms), instead of
+                        // scanning and tapping on literally the very
+                        // next tick with zero settle time at all.
                         scrolledToLatestMessage = true
                         mediaDownloadStage = 0
-                        handler.post(this)
+                        handler.postDelayed(this, 400L)
                     }
                 }
                 0 -> {
@@ -1357,6 +1422,28 @@ class WaSendAccessibilityService : AccessibilityService() {
                             dynamicMediaDownloadTimeoutMs = (MEDIA_DOWNLOAD_TIMEOUT_MS + maxSwipes * MEDIA_DOWNLOAD_TIMEOUT_PER_EXTRA_ITEM_MS)
                                 .coerceAtMost(MEDIA_DOWNLOAD_TIMEOUT_MS_MAX)
                             EventLog.log("A11y-MediaDownload: ⏱️ תקציב הזמן הורחב ל-${dynamicMediaDownloadTimeoutMs / 1000}s עבור אלבום בגודל $n (עד $maxSwipes החלקות)")
+                        }
+                        // FIX (08.9.2026, truncated-video bug): now that
+                        // stage 1 waits for real file-size stability
+                        // before backing out (a real download of a long
+                        // video takes real time), give a long video
+                        // proportionally more of the overall timeout
+                        // budget up front instead of leaving it stuck
+                        // with the plain single-image default - a video
+                        // stated to run N seconds is given roughly N
+                        // seconds of extra budget (capped at the same
+                        // overall ceiling used for big albums), rather
+                        // than guessing a single fixed number that would
+                        // either starve long videos or waste budget on
+                        // short ones.
+                        if (job.mediaType == MediaClassifier.MediaType.VIDEO) {
+                            VIDEO_DURATION_IN_DESC_REGEX.find(descText)?.groupValues?.get(1)?.toIntOrNull()?.let { seconds ->
+                                val widened = (MEDIA_DOWNLOAD_TIMEOUT_MS + seconds * 1000L).coerceAtMost(MEDIA_DOWNLOAD_TIMEOUT_MS_MAX)
+                                if (widened > dynamicMediaDownloadTimeoutMs) {
+                                    dynamicMediaDownloadTimeoutMs = widened
+                                    EventLog.log("A11y-MediaDownload: ⏱️ תקציב הזמן הורחב ל-${dynamicMediaDownloadTimeoutMs / 1000}s עבור סרטון באורך $seconds שניות")
+                                }
+                            }
                         }
                         EventLog.log("A11y-MediaDownload: נמצאה בועת מדיה, לוחץ לפתיחה (הכרחת הורדה)")
                         bubble.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -1830,8 +1917,67 @@ class WaSendAccessibilityService : AccessibilityService() {
                         maxCount = expectedAlbumSize,
                         matchWindowMs = elapsedSinceTap + 5000L
                     )
+                    // FIX (08.9.2026, truncated-video bug): a real
+                    // on-device log (08.9 10:21, a 1364KB/6s file saved
+                    // for a video whose own bubble description said 137
+                    // seconds long) showed this used to back out and tap
+                    // GLOBAL_ACTION_BACK the INSTANT a matching file
+                    // merely EXISTED on disk (2s after tapping "Save"),
+                    // with no check that WhatsApp had actually finished
+                    // writing it. WhatsApp creates the destination file
+                    // (and MediaStore indexes it) as soon as the save
+                    // starts, then keeps appending bytes to it in the
+                    // background - so a file existing after only 2s is
+                    // itself informative only for something already
+                    // fully on disk (typical for photos), never proof of
+                    // a completed video write. Backing out mid-write
+                    // appears to interrupt/cancel that background write,
+                    // permanently truncating the file at whatever had
+                    // been flushed so far - exactly matching the
+                    // reported numbers (1364KB/~6s out of a much larger,
+                    // 137s original). Only videos are large/slow enough
+                    // for this window to matter in practice, so this is
+                    // scoped to VIDEO to avoid changing the already-
+                    // working photo/album timing at all. Requires the
+                    // SAME file to report an unchanged length() across
+                    // two consecutive ~1s poll cycles before it's
+                    // trusted as finished; any growth resets the count
+                    // and we simply wait another cycle.
+                    // FIX (09.9.2026, mixed-album video still not
+                    // protected): scoping the check above to `job.
+                    // mediaType == VIDEO` missed the very common case of
+                    // a MIXED album (photo + video together) - confirmed
+                    // on-device: a 2-item MIXED album's video component
+                    // only survived intact because swiping to the 2nd
+                    // item happened to burn enough extra time for
+                    // WhatsApp to finish writing it anyway, not because
+                    // this check protected it. A MIXED job's mediaType
+                    // is "MIXED", never "VIDEO", so the old per-job check
+                    // silently never applied to it. Now checks each
+                    // found item's own mimeType instead of the overall
+                    // job type, so a video is protected whether it's a
+                    // lone VIDEO job or one item inside a MIXED album -
+                    // non-video items (photos) are still considered
+                    // stable immediately, same as before.
+                    val stabilityConfirmed = found.all { fm ->
+                        val isVideoFile = fm.mimeType.startsWith("video/", ignoreCase = true)
+                        if (!isVideoFile) {
+                            true
+                        } else {
+                            val path = fm.file.absolutePath
+                            val currentLen = fm.file.length()
+                            val previousLen = lastKnownFileSizes[path]
+                            lastKnownFileSizes[path] = currentLen
+                            previousLen != null && previousLen == currentLen && currentLen > 0L
+                        }
+                    }
                     val remainingBudgetMs = dynamicMediaDownloadTimeoutMs - (System.currentTimeMillis() - mediaDownloadStartTime)
                     val mustBackOutNow = found.isNotEmpty() && remainingBudgetMs < 2500L
+                    if (found.isNotEmpty() && !stabilityConfirmed && !mustBackOutNow) {
+                        EventLog.log("A11y-MediaDownload: ⏳ [+${elapsedSinceTap / 1000}s] נמצא קובץ אך גודלו עדיין משתנה (כתיבה בעיצומה) - ממתין לפני שחוזר אחורה כדי לא לחתוך את הסרטון")
+                        handler.postDelayed(this, MEDIA_DOWNLOAD_POLL_INTERVAL_MS)
+                        return
+                    }
                     pollCyclesOnCurrentItem++
 
                     val canSwipeForMore = found.size < expectedAlbumSize &&

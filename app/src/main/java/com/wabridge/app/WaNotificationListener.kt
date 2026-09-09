@@ -117,18 +117,42 @@ class WaNotificationListener : NotificationListenerService() {
         // Expires entries older than SENT_FILE_MEMORY_MS on each check so
         // this can't grow unbounded or block a genuinely-resent file hours
         // later.
-        private val recentlySentFiles = LinkedHashMap<String, Long>()
+        //
+        // FIX (09.9.2026, cross-contamination bug): now stores the TARGET
+        // (contact/group name) each file was sent for, not just a
+        // timestamp - see wasRecentlySent()'s doc comment for why.
+        private val recentlySentFiles = LinkedHashMap<String, Pair<String, Long>>()
         private const val SENT_FILE_MEMORY_MS = 60_000L
 
+        // FIX (09.9.2026, cross-contamination bug): a real on-device log
+        // showed two DIFFERENT contacts each send media within the same
+        // few seconds - WaMediaLocator has no way to know which chat a
+        // file on disk actually belongs to (WhatsApp doesn't tag media
+        // files with sender/recipient info), so it matched the SAME
+        // recently-downloaded file to BOTH notifications. The first
+        // contact's message correctly sent that file and marked it sent;
+        // the second contact's message then saw "this exact file was
+        // already sent" and - since that check only tracked timestamps -
+        // concluded this was a stale duplicate re-notification of the
+        // SAME message and silently cancelled the entire second email,
+        // even though it was a genuinely new, different message that
+        // simply never got ITS real media file attached.
+        //
+        // Returns the target the file was sent for (null if not recently
+        // sent at all), so the caller can tell "already sent for THIS
+        // target" (a real duplicate - safe to suppress) apart from
+        // "already sent for a DIFFERENT target" (a suspected wrong-file
+        // match - the file shouldn't be reused, but the message itself
+        // is NOT a duplicate and must not be silently dropped).
         @Synchronized
-        private fun wasRecentlySent(path: String, now: Long): Boolean {
-            recentlySentFiles.entries.removeAll { now - it.value > SENT_FILE_MEMORY_MS }
-            return recentlySentFiles.containsKey(path)
+        private fun wasRecentlySent(path: String, now: Long): String? {
+            recentlySentFiles.entries.removeAll { now - it.value.second > SENT_FILE_MEMORY_MS }
+            return recentlySentFiles[path]?.first
         }
 
         @Synchronized
-        private fun markSent(path: String, now: Long) {
-            recentlySentFiles[path] = now
+        private fun markSent(path: String, now: Long, target: String) {
+            recentlySentFiles[path] = target to now
         }
 
         // FIX (04.9.2026, "don't send until ready" request): a cheap,
@@ -823,11 +847,51 @@ class WaNotificationListener : NotificationListenerService() {
             // here - they're routed to Drive-link instead of a direct
             // attachment further down, not dropped.
             var droppedTooLargeNote: String? = null
+            // FIX (08.9.2026, large-file-swallows-own-email bug): a real
+            // on-device log showed a lone 24MB video get routed to
+            // chunked upload (which calls markSent() immediately on this
+            // exact file, right below, so a reposted notification for
+            // the same file doesn't trigger a second upload) - and then,
+            // moments later in the SAME pass, the "did every found file
+            // turn out to be an already-sent duplicate" check below read
+            // wasRecentlySent() on that very file and saw it as TRUE,
+            // because THIS pass had just marked it, not because any
+            // earlier job ever actually sent it. That misclassified a
+            // brand-new large video as "just a stale repost of an
+            // already-delivered album" and suppressed the entire
+            // notification (droppedTooLargeNote included), even though
+            // the background chunked upload really was just kicked off
+            // and a real user was waiting for any confirmation at all.
+            // Snapshotting each file's sent-state BEFORE this pass runs
+            // (i.e. before any markSent() call below can taint it) means
+            // the post-filter check only ever reflects genuinely earlier
+            // jobs, never this one's own side effects.
+            val alreadySentBeforeThisPass = found.associate { it.file.absolutePath to wasRecentlySent(it.file.absolutePath, now) }
+            // FIX (09.9.2026, cross-contamination bug): true only if a
+            // found file was already sent for a DIFFERENT target than
+            // this message's own - see wasRecentlySent()'s doc comment.
+            // Used below to give the email a clear note instead of
+            // silently arriving with no media and no explanation.
+            var hadCrossTargetFileMismatch = false
             val usable = found.filter { fm ->
                 val path = fm.file.absolutePath
+                val sentForTarget = alreadySentBeforeThisPass[path]
                 when {
-                    wasRecentlySent(path, now) -> {
+                    sentForTarget == target -> {
                         EventLog.log("Listener: ⏭️ מדלג - קובץ זה כבר נשלח לאחרונה: ${fm.file.name}")
+                        false
+                    }
+                    sentForTarget != null -> {
+                        // Sent recently, but for a DIFFERENT target - almost
+                        // certainly WaMediaLocator matching the same file to
+                        // two different people's concurrent messages, not a
+                        // real duplicate of THIS message. Don't reuse
+                        // someone else's file, but this message still needs
+                        // to go out somehow (see hadCrossTargetFileMismatch
+                        // below) rather than being mistaken for a stale
+                        // repost and dropped entirely.
+                        EventLog.log("Listener: ⚠️ הקובץ ${fm.file.name} נשלח לאחרונה אבל עבור יעד אחר ('$sentForTarget') - כנראה שיוך שגוי, לא ישלח שוב עבור '$target'")
+                        hadCrossTargetFileMismatch = true
                         false
                     }
                     fm.file.length() > MEDIA_HARD_DROP_CAP_BYTES -> {
@@ -866,7 +930,7 @@ class WaNotificationListener : NotificationListenerService() {
                             // file would be handed to ChunkedMediaUploader
                             // a second time, uploading it twice and
                             // sending two follow-up emails for one file.
-                            markSent(fm.file.absolutePath, now)
+                            markSent(fm.file.absolutePath, now, target)
                             ChunkedMediaUploader.uploadInBackground(webAppUrl, fm.file, fm.mimeType, title, text, phone, isGroup)
                             if (droppedTooLargeNote == null) {
                                 droppedTooLargeNote = "${fm.file.name} (${mb}MB) - מועלה בחלקים, יגיע במייל נפרד"
@@ -901,7 +965,14 @@ class WaNotificationListener : NotificationListenerService() {
                 // information, so the whole email is suppressed rather
                 // than going out empty with a misleading "2 תמונות"-style
                 // body and mediaCount:0.
-                val allFilteredWereAlreadySent = found.all { wasRecentlySent(it.file.absolutePath, now) }
+                //
+                // FIX (09.9.2026, cross-contamination bug): only true when
+                // every found file was already sent for THIS SAME target -
+                // a file sent for a DIFFERENT target doesn't count as "this
+                // message was already handled", so hadCrossTargetFileMismatch
+                // below takes priority over this branch.
+                val allFilteredWereAlreadySent = !hadCrossTargetFileMismatch &&
+                    found.all { alreadySentBeforeThisPass[it.file.absolutePath] == target }
                 if (allFilteredWereAlreadySent) {
                     EventLog.log("Listener: ⏭️ מדלג על שליחה כולה - כל ${found.size} הקבצים שנמצאו כבר נשלחו לאחרונה (התראה חוזרת/מתעדכנת עבור אותו אלבום)")
                     return AttachResult(emptyList(), skipEntireSend = true)
@@ -910,7 +981,16 @@ class WaNotificationListener : NotificationListenerService() {
                 // this is exactly the "every file was too big" case (e.g.
                 // a single 37MB video), which previously fell through to
                 // a plain-text-only email with no explanation.
-                return AttachResult(emptyList(), droppedTooLargeNote = droppedTooLargeNote)
+                //
+                // FIX (09.9.2026, cross-contamination bug): if the only
+                // reason nothing is usable is a suspected wrong-file match,
+                // say so explicitly instead of leaving the email with no
+                // media and no explanation at all (or, worse, cancelling
+                // it as a false duplicate).
+                val note = droppedTooLargeNote ?: if (hadCrossTargetFileMismatch) {
+                    "לא הצלחתי לשייך בבטחה קובץ מדיה להודעה הזו (יתכן שהתערבב עם הודעת מדיה אחרת שהגיעה במקביל מאיש קשר אחר) - ההודעה נשלחה כטקסט בלבד"
+                } else null
+                return AttachResult(emptyList(), droppedTooLargeNote = note)
             }
 
             if (expectedCount > usable.size) {
@@ -927,7 +1007,7 @@ class WaNotificationListener : NotificationListenerService() {
             // above PendingAttachment for why encoding itself is deferred
             // out of this function entirely now.
             val attachments = usable.map { fm ->
-                markSent(fm.file.absolutePath, now)
+                markSent(fm.file.absolutePath, now, target)
                 // Effectively always false now that MEDIA_HARD_DROP_CAP_
                 // BYTES == MEDIA_SIZE_CAP_BYTES (see that constant's doc
                 // comment) - anything bigger already went to
@@ -957,6 +1037,31 @@ class WaNotificationListener : NotificationListenerService() {
         listenerConnectedAtMs = System.currentTimeMillis()
         Log.i(TAG, "Notification listener connected")
         EventLog.log("Listener: 🔌 שירות ההאזנה להתראות התחבר")
+        // FIX (09.9.2026, "which build is actually installed?" bug-
+        // hunting aid): several rounds of on-device logs looked
+        // identical to pre-fix behavior even after the person believed
+        // they had installed an updated APK, with no way to tell from
+        // the log alone whether the old build was simply still running.
+        // Logging the app's own version here, every single time the
+        // listener connects (which happens on every boot/reinstall/
+        // re-enable), makes that unambiguous going forward instead of
+        // inferring it indirectly from which log lines are present.
+        logInstalledAppVersion()
+    }
+
+    private fun logInstalledAppVersion() {
+        try {
+            val pkgInfo = packageManager.getPackageInfo(packageName, 0)
+            @Suppress("DEPRECATION")
+            val versionCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                pkgInfo.longVersionCode
+            } else {
+                pkgInfo.versionCode.toLong()
+            }
+            EventLog.log("Listener: ℹ️ גרסת אפליקציה מותקנת: ${pkgInfo.versionName} (versionCode=$versionCode)")
+        } catch (e: Exception) {
+            EventLog.log("Listener: ⚠️ לא הצלחתי לקרוא את מספר הגרסה של האפליקציה: $e")
+        }
     }
 
     override fun onListenerDisconnected() {

@@ -73,6 +73,16 @@ object ChunkedMediaUploader {
         val sessionId = UUID.randomUUID().toString()
         val totalSize = file.length()
         val totalChunks = ((totalSize + CHUNK_SIZE_BYTES - 1) / CHUNK_SIZE_BYTES).toInt().coerceAtLeast(1)
+        // FIX (09.9.2026, "arrived smaller than the original" bug hunt):
+        // logs the exact byte count read from disk right before upload
+        // starts, so it can be compared directly against whatever byte
+        // count Code.gs reports having assembled at the end (see the
+        // bytesReceived comparison below) - if the two don't match,
+        // that pinpoints whether bytes were lost on the way OUT of the
+        // phone (a read/chunking bug here) or reassembled wrong on the
+        // Apps Script side, instead of just seeing "it's smaller" with
+        // no way to tell which side to look at.
+        EventLog.log("Listener: 📤 מתחיל העלאה בחלקים: ${file.name}, גודל מקורי בדיסק: $totalSize בייטים (${totalSize / (1024 * 1024)}MB, $totalChunks חלקים)")
 
         val startBody = JSONObject().apply {
             put("action", "startChunkUpload")
@@ -125,6 +135,30 @@ object ChunkedMediaUploader {
                     Log.w(TAG, "uploadChunk $index rejected: $chunkResponse")
                     EventLog.log("Listener: ❌ העלאת חלק ${index + 1}/$totalChunks נכשלה עבור ${file.name}: $chunkResponse")
                     return
+                }
+
+                if (isLast) {
+                    // FIX (09.9.2026, "arrived smaller than the
+                    // original" bug hunt): Code.gs now reports back
+                    // exactly how many bytes it reassembled from all the
+                    // chunks (bytesReceived) - compare that directly
+                    // against what THIS device actually read from the
+                    // source file (bytesSentTotal) and against the
+                    // file's size at the very start (totalSize). Any
+                    // mismatch here is now unambiguous: totalSize !=
+                    // bytesSentTotal points at something on the phone
+                    // (the file kept changing after the "stable" check
+                    // passed, or a read error), while bytesSentTotal !=
+                    // bytesReceived points at something between the
+                    // phone and Code.gs (a dropped/corrupted chunk).
+                    val bytesReceived = try { JSONObject(chunkResponse).optLong("bytesReceived", -1L) } catch (e: Exception) { -1L }
+                    if (bytesReceived < 0) {
+                        EventLog.log("Listener: ⚠️ השרת לא דיווח כמות בייטים שהורכבה (בנייה ישנה של Code.gs?) - אי אפשר להשוות גדלים באופן אוטומטי")
+                    } else if (totalSize == bytesSentTotal && bytesSentTotal == bytesReceived) {
+                        EventLog.log("Listener: ✅ אימות גודל: מקור=$totalSize, נשלח=$bytesSentTotal, התקבל בשרת=$bytesReceived בייטים - תואם במדויק")
+                    } else {
+                        EventLog.log("Listener: ⚠️ אי-התאמת גודל! מקור בדיסק=$totalSize, נשלח בפועל=$bytesSentTotal, הורכב בשרת=$bytesReceived בייטים - הקובץ הסופי עלול להיות פגום/חתוך")
+                    }
                 }
 
                 EventLog.log("Listener: 📤 הועלה חלק ${index + 1}/$totalChunks (${file.name})")

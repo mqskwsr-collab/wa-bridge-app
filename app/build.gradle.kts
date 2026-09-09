@@ -11,8 +11,8 @@ android {
         applicationId = "com.wabridge.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 40
-        versionName = "0.40-fix40-experimental-phone-learn"
+        versionCode = 45
+        versionName = "0.45-fix45-chunk-upload-byte-diagnostics"
     }
 
     buildTypes {
