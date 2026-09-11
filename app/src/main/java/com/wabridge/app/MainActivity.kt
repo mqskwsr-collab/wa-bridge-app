@@ -137,6 +137,17 @@ class MainActivity : AppCompatActivity() {
             saveLogToDownloadsFileOrRequestPermission()
         }
 
+        // FIX (11.9.2026): lets the user start a clean test run
+        // without old entries mixed in - EventLog.clear() empties the
+        // in-memory buffer, and this immediately refreshes the
+        // on-screen text too instead of waiting up to 1s for the
+        // regular refresh tick.
+        findViewById<Button>(R.id.btnClearLog).setOnClickListener {
+            EventLog.clear()
+            tvLastEvent.text = "(אין אירועים עדיין)"
+            Toast.makeText(this, "היומן נוקה", Toast.LENGTH_SHORT).show()
+        }
+
         val lastCrash = WaBridgeApplication.getLastCrash(this)
         val tvLastCrash = findViewById<TextView>(R.id.tvLastCrash)
         if (lastCrash != null) {

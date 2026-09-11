@@ -27,7 +27,10 @@ object EventLog {
     // FIX (21.8.2026): added the date - now that the buffer can span
     // well over 24h, "HH:mm:ss" alone would make entries from
     // different days indistinguishable/ambiguous.
-    private val fmt = SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault())
+    // FIX (11.9.2026): added milliseconds - with polling now every
+    // 15s (down from 45s), several log lines can legitimately share
+    // the same second, making event ordering ambiguous at a glance.
+    private val fmt = SimpleDateFormat("dd/MM HH:mm:ss.SSS", Locale.getDefault())
 
     @Synchronized
     fun log(message: String) {
@@ -38,4 +41,12 @@ object EventLog {
 
     @Synchronized
     fun getAll(): String = entries.joinToString("\n")
+
+    // FIX (11.9.2026): lets the user start a clean test run from
+    // MainActivity's new "נקה לוגים" button instead of scrolling back
+    // through old entries to find the new ones.
+    @Synchronized
+    fun clear() {
+        entries.clear()
+    }
 }
