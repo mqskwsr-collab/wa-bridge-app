@@ -78,7 +78,25 @@ class WaNotificationListener : NotificationListenerService() {
         // notifications were interleaved in between, as long as it's
         // still within the window.
         private val recentKeys = ArrayDeque<Pair<String, Long>>()
-        private const val DEDUPE_WINDOW_MS = 3000L
+        // FIX (15.9.2026, duplicate-email bug): confirmed on-device -
+        // this window was SHORTER than MEDIA_BURST_QUIET_MS (4000ms,
+        // the coalesce-wait before a media notification actually gets
+        // sent). WhatsApp reliably re-posts an identical-text
+        // notification for the same message a few seconds after the
+        // first one (confirmed: same exact text "📷 ‏תמונה", ~4047ms
+        // after the original) - by the time our burst-wait finished and
+        // sent the first email, this entry had ALREADY expired out of
+        // recentKeys (3000ms < ~4047ms gap), so the re-announcement
+        // sailed straight through this check as if it were a brand-new
+        // message and triggered a full second, redundant send (real
+        // log: two separate "✅ נשלח" HTTP 200 posts, 4s apart, for one
+        // photo). Widened to comfortably outlast the burst-wait plus
+        // some margin for slower devices/networks, so a same-text
+        // re-announcement arriving shortly after our own send is still
+        // caught here - the layer built specifically for this, keyed on
+        // actual message content, unlike the coarser target+mediaType-
+        // only MEDIA_EVENT_DEDUPE_WINDOW_MS below.
+        private const val DEDUPE_WINDOW_MS = 9000L
         private const val RECENT_KEYS_MAX = 8
         // FIX (23.8.2026, redundant-empty-email bug): matches WhatsApp's
         // bare unread-count summary text, e.g. "‏2 הודעות חדשות" / "2 new

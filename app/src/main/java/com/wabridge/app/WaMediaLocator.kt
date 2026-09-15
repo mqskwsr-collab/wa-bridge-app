@@ -229,6 +229,24 @@ object WaMediaLocator {
             MediaClassifier.MediaType.NONE -> return null
         }
 
+        // FIX (15.9.2026, stale-sticker-file bug): real on-device log -
+        // the correct folder WAS found and DID contain the right sticker
+        // files (STK-*.webp), but both were rejected: their lastModified
+        // was ~5.5-6 HOURS before the notification time, way outside
+        // even a generous window. Root cause: unlike a photo/video (a
+        // genuinely new file every time), a sticker is a shared pack
+        // asset - if this exact sticker was ever received before,
+        // WhatsApp reuses the same cached .webp file rather than writing
+        // a new one, so its mtime reflects the FIRST time it was ever
+        // received, not this message. A tight match window is actively
+        // wrong for this folder. Since WhatsApp Stickers only ever holds
+        // legitimately-received sticker files (no risk of grabbing an
+        // unrelated photo the way a shared Downloads folder might), just
+        // take the newest file in it outright for STICKER, ignoring the
+        // notification-time window entirely rather than guessing at a
+        // "wide enough" number.
+        val effectiveMatchWindowMs = if (type == MediaClassifier.MediaType.STICKER) Long.MAX_VALUE else matchWindowMs
+
         // FIX (23.8.2026): on-device log finally showed all 8 real
         // overflow-menu item labels (previous dumps only showed empty
         // container text): כל המדיה / להציג בצ'אט / שיתוף / שמירה /
@@ -282,7 +300,7 @@ object WaMediaLocator {
 
 
             val matchHere = filesHere
-                .filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= matchWindowMs }
+                .filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= effectiveMatchWindowMs }
                 .maxByOrNull { it.lastModified() }
             if (matchHere != null && (bestFile == null || matchHere.lastModified() > bestFile!!.lastModified())) {
                 bestFile = matchHere
@@ -302,7 +320,7 @@ object WaMediaLocator {
         val best = bestFile
 
         if (best == null) {
-            Log.w(TAG, "No recent file matched in any of: ${triedDirs.joinToString(" , ") { it.absolutePath }} within ${matchWindowMs}ms of $notificationTimeMs")
+            Log.w(TAG, "No recent file matched in any of: ${triedDirs.joinToString(" , ") { it.absolutePath }} within ${effectiveMatchWindowMs}ms of $notificationTimeMs")
             if (type == MediaClassifier.MediaType.VOICE_NOTE) {
                 // FIX (01.9.2026, cleanup): on-device testing confirmed voice
                 // notes now reliably land in the plain Downloads folder via
