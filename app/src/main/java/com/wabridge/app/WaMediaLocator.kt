@@ -73,6 +73,13 @@ object WaMediaLocator {
     )
     private const val SUBFOLDER_IMAGES = "WhatsApp Images"
     private const val SUBFOLDER_VIDEO = "WhatsApp Video"
+    // FIX (15.9.2026, lost-sticker bug): stickers are real .webp image
+    // files WhatsApp writes to their own dedicated folder, separate from
+    // WhatsApp Images. Both spellings seen across WhatsApp versions are
+    // tried; SUBFOLDER_IMAGES is kept as a fallback in the search list
+    // below in case a given install saves them there instead.
+    private const val SUBFOLDER_STICKERS = "WhatsApp Stickers"
+    private const val SUBFOLDER_STICKERS_ALT = "WhatsApp Images/Sent/Stickers"
     private const val SUBFOLDER_VOICE_NOTES = "WhatsApp Voice Notes"
     // FIX (28.8.2026, voice-note research): web research on where
     // WhatsApp actually stores voice messages turned up a SECOND,
@@ -196,6 +203,11 @@ object WaMediaLocator {
                 SUBFOLDER_VOICE_NOTES_AUDIO_SENT,
                 SUBFOLDER_VOICE_NOTES,
                 SUBFOLDER_VOICE_NOTES_ALT
+            )
+            MediaClassifier.MediaType.STICKER -> listOf(
+                SUBFOLDER_STICKERS,
+                SUBFOLDER_STICKERS_ALT,
+                SUBFOLDER_IMAGES
             )
             MediaClassifier.MediaType.NONE -> return null
         }
@@ -356,6 +368,9 @@ object WaMediaLocator {
             // API, they'd show up here under Audio, not Images/Video.
             // Worth checking for real instead of assuming.
             MediaClassifier.MediaType.VOICE_NOTE -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            // Stickers are .webp images - MediaStore indexes them under
+            // Images, same as photos.
+            MediaClassifier.MediaType.STICKER -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
             else -> return null
         }
 
@@ -436,6 +451,7 @@ object WaMediaLocator {
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI
             )
+            MediaClassifier.MediaType.STICKER -> listOf(MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
             else -> return emptyList()
         }
 

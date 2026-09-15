@@ -21,6 +21,18 @@ object MediaClassifier {
         IMAGE,
         VIDEO,
         VOICE_NOTE,
+        // FIX (15.9.2026, lost-sticker bug): stickers (incl. the WhatsApp
+        // "big word" text-art stickers like "תודה"/"אמן" - real .webp
+        // image files sent via the sticker keyboard, not client-rendered
+        // text) were never recognized by classify() at all, since the
+        // notification text for a sticker ("מדבקה"/"Sticker") matches
+        // none of the IMAGE/VIDEO/VOICE markers below - it fell through
+        // to NONE, which skips media-attach entirely (see
+        // WaNotificationListener's `if (mediaType == NONE) return
+        // AttachResult(emptyList())`), so the sticker's actual picture
+        // never made it into the email at all. Dedicated type so callers
+        // can search the Images collection/sticker folders for it.
+        STICKER,
         // FIX (04.9.2026, mixed-album-loses-photos bug): confirmed
         // on-device - a real album containing both photos AND a video
         // ("11 תמונות, סרטון וידאו 1") was classified as pure VIDEO
@@ -41,18 +53,25 @@ object MediaClassifier {
     private val IMAGE_MARKERS = listOf("תמונה", "photo", "image", "\uD83D\uDCF7", "\uD83D\uDCF8")
     private val VIDEO_MARKERS = listOf("וידאו", "סרטון", "video", "\uD83C\uDFA5", "\uD83D\uDCF9")
     private val VOICE_MARKERS = listOf("הודעה קולית", "voice message", "audio message", "\uD83C\uDFA4")
+    // Sticker notification text is a single distinctive word ("מדבקה" /
+    // "Sticker"), never combined with a caption the way photos/videos
+    // can be - checked first alongside voice, before the more
+    // permissive image/video keyword scan.
+    private val STICKER_MARKERS = listOf("מדבקה", "sticker")
 
     fun classify(rawText: String): MediaType {
         val text = Utils.stripBidiMarks(rawText).trim()
         if (text.isEmpty()) return MediaType.NONE
 
-        // Check voice first (most distinctive, fewest false-positive
-        // risk). Then check whether BOTH image and video markers are
-        // present - a mixed album, e.g. the camera emoji from the photo
-        // count PLUS "סרטון"/"video" from the video count in the same
-        // notification text - before falling back to single-type
-        // detection, so a mix never gets mistaken for one type alone.
+        // Check voice/sticker first (most distinctive, fewest false-
+        // positive risk). Then check whether BOTH image and video
+        // markers are present - a mixed album, e.g. the camera emoji
+        // from the photo count PLUS "סרטון"/"video" from the video
+        // count in the same notification text - before falling back to
+        // single-type detection, so a mix never gets mistaken for one
+        // type alone.
         if (VOICE_MARKERS.any { text.contains(it, ignoreCase = true) }) return MediaType.VOICE_NOTE
+        if (STICKER_MARKERS.any { text.contains(it, ignoreCase = true) }) return MediaType.STICKER
         val hasVideo = VIDEO_MARKERS.any { text.contains(it, ignoreCase = true) }
         val hasImage = IMAGE_MARKERS.any { text.contains(it, ignoreCase = true) }
         if (hasVideo && hasImage) return MediaType.MIXED
