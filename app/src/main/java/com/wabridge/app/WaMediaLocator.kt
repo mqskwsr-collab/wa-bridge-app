@@ -149,7 +149,24 @@ object WaMediaLocator {
         // findViaMediaStore's doc comment) - for that type, the best we
         // can do without a bigger rewrite of the folder-scan fallback is
         // the single-file path, so just wrap that.
-        if (type == MediaClassifier.MediaType.VOICE_NOTE) {
+        // FIX (15.9.2026, lost-sticker bug part 5): THE REAL ROOT CAUSE,
+        // found via web research (WhatsApp support articles + real
+        // on-device file-path guides), confirmed against this file's own
+        // CANDIDATE_BASE_PATHS/SUBFOLDER_STICKERS added in part 1:
+        // received stickers are NOT MediaStore-indexed AT ALL (unlike
+        // photos/videos, which WhatsApp explicitly inserts into
+        // MediaStore) - they only ever exist as plain .webp files under
+        // Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Stickers,
+        // which this file's filesystem-fallback CANDIDATE_BASE_PATHS
+        // already covers (line 56) - but ONLY findRecentMediaFile
+        // (singular) ever reaches that fallback. This plural function
+        // went straight to findMultipleViaMediaStore for every type
+        // except VOICE_NOTE, so it was GUARANTEED to find nothing for a
+        // sticker before even attempting the accessibility "force
+        // download" flow, no matter how that flow's UI-tapping is
+        // written - all four sticker fix attempts so far were chasing
+        // the wrong stage. Same treatment as VOICE_NOTE fixes it.
+        if (type == MediaClassifier.MediaType.VOICE_NOTE || type == MediaClassifier.MediaType.STICKER) {
             val single = findRecentMediaFile(context, type, notificationTimeMs, matchWindowMs)
             return if (single != null && single.file.absolutePath !in excludePaths) listOf(single) else emptyList()
         }
