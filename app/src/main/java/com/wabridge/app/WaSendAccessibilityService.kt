@@ -171,6 +171,14 @@ class WaSendAccessibilityService : AccessibilityService() {
         // "play voice message" button - see the long-press experiment
         // this feeds, in stage 0's bubble==null branch.
         private val VOICE_NOTE_PLAY_BUTTON_REGEX = Regex("""(השמעת ההודעה הקולית|play voice (message|note))""", RegexOption.IGNORE_CASE)
+        // FIX (15.9.2026, lost-sticker bug part 4): a received sticker
+        // bubble carries no useful content-description of its own
+        // (desc='null' on-device) - only its resource id identifies it,
+        // seen on-device as sticker_1/sticker_2 (WhatsApp appears to
+        // alternate/recycle this id between the two most recent sticker
+        // views). Feeds the same long-press experiment as
+        // VOICE_NOTE_PLAY_BUTTON_REGEX above, via findBottommostMatchingViewId.
+        private val STICKER_BUBBLE_ID_REGEX = Regex("""sticker_\d+$""")
         // FIX (21.8.2026): the FULL on-device tree dump (see FIX46)
         // revealed the real culprit for why imgCount stayed flat at 2
         // the whole timeout - the photo bubble is classed as
@@ -244,7 +252,25 @@ class WaSendAccessibilityService : AccessibilityService() {
         // already runs for every media type will show exactly what
         // opens, so the next real EventLog will confirm or rule this
         // out rather than guessing further blind.
-        private val MEDIA_BUBBLE_DESC_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image|צפייה בסרטון|viewing video|העברת המדבקה|forward(ing)? the sticker)""", RegexOption.IGNORE_CASE)
+        // FIX (15.9.2026, lost-sticker bug part 4): parts 2 and 3 both
+        // routed STICKER through this single-click path (matching
+        // sticker_1/2's id, then the "העברת המדבקה"/forward icon) -
+        // real on-device logs confirmed BOTH are dead ends: a single
+        // tap on the sticker opens WhatsApp's sticker-detail bottom
+        // sheet (Favorites/Add to pack/Edit/View pack, no save/share),
+        // and a single tap on the forward icon opens WhatsApp's own
+        // in-app contact-picker (resend within WhatsApp, no file
+        // access) - neither is what images/videos get from a plain
+        // click, because a sticker bubble isn't a full-screen-viewer
+        // trigger the way a photo/video bubble is. Reverted to the
+        // original image/video-only match; STICKER now falls through
+        // to the bubble==null branch below and reuses the SAME
+        // long-press -> selection toolbar -> More options -> Share ->
+        // Save as (SAF) chain that already works end-to-end for voice
+        // notes - that chain only ever needed a long-press to select
+        // the message in the first place, which is generic to any
+        // message type, not voice-note-specific.
+        private val MEDIA_BUBBLE_DESC_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image|צפייה בסרטון|viewing video)""", RegexOption.IGNORE_CASE)
         // FIX (2.9.2026, tapped-cancel-button bug): real on-device log
         // (2.9 10:32) for a 26MB/2:17 video showed the "bubble" picked by
         // findBottommostImageViewClassed had id=com.whatsapp:id/
@@ -1427,9 +1453,20 @@ class WaSendAccessibilityService : AccessibilityService() {
                         // context menu actually contains - whether it has
                         // a usable save/share/forward option at all -
                         // instead of continuing to guess blind.
-                        if (job.mediaType == MediaClassifier.MediaType.VOICE_NOTE && !hasTriedVoiceNoteLongPress) {
+                        if ((job.mediaType == MediaClassifier.MediaType.VOICE_NOTE || job.mediaType == MediaClassifier.MediaType.STICKER) && !hasTriedVoiceNoteLongPress) {
                             hasTriedVoiceNoteLongPress = true
-                            val playButton = findBottommostMatchingDescription(root, VOICE_NOTE_PLAY_BUTTON_REGEX)
+                            // FIX (15.9.2026, lost-sticker bug part 4): voice
+                            // notes are found by their play-button description;
+                            // a sticker bubble has no description at all
+                            // on-device, only its sticker_1/sticker_2 id - so
+                            // pick the right finder per type. Everything from
+                            // here on (the long-press itself, the selection
+                            // toolbar, More options, Share, Save as) is
+                            // generic to any selected message and unchanged.
+                            val playButton = if (job.mediaType == MediaClassifier.MediaType.STICKER)
+                                findBottommostMatchingViewId(root, STICKER_BUBBLE_ID_REGEX)
+                            else
+                                findBottommostMatchingDescription(root, VOICE_NOTE_PLAY_BUTTON_REGEX)
                             if (playButton != null) {
                                 val r = Rect()
                                 playButton.getBoundsInScreen(r)
@@ -1437,7 +1474,8 @@ class WaSendAccessibilityService : AccessibilityService() {
                                 // THIS bubble's position as the target for every
                                 // later re-detection to be checked against.
                                 originalVoiceNoteButtonBounds = Rect(r)
-                                EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] נמצא כפתור השמעת הקלטה ב-$r - מנסה לחיצה ארוכה כדי לחשוף תפריט הודעה")
+                                val targetLabel = if (job.mediaType == MediaClassifier.MediaType.STICKER) "בועת מדבקה" else "כפתור השמעת הקלטה"
+                                EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] נמצא $targetLabel ב-$r - מנסה לחיצה ארוכה כדי לחשוף תפריט הודעה")
                                 val longPressPath = Path().apply { moveTo(r.centerX().toFloat(), r.centerY().toFloat()) }
                                 val longPressGesture = GestureDescription.Builder()
                                     .addStroke(GestureDescription.StrokeDescription(longPressPath, 0, 700))
@@ -1458,9 +1496,9 @@ class WaSendAccessibilityService : AccessibilityService() {
                                     }
                                 }, null)
                             } else {
-                                EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] לא נמצא כפתור השמעת הקלטה למחוות לחיצה ארוכה")
+                                EventLog.log("A11y-MediaDownload: 🎙️ [ניסוי] לא נמצא יעד ללחיצה ארוכה (כפתור השמעה/בועת מדבקה)")
                             }
-                        } else if (job.mediaType == MediaClassifier.MediaType.VOICE_NOTE &&
+                        } else if ((job.mediaType == MediaClassifier.MediaType.VOICE_NOTE || job.mediaType == MediaClassifier.MediaType.STICKER) &&
                             voiceNoteLongPressCompleted && !hasTriedVoiceNoteLastMoreOptionsTap
                         ) {
                             // FIX (01.9.2026, cleanup): confirmed on-device
@@ -2218,6 +2256,40 @@ class WaSendAccessibilityService : AccessibilityService() {
                         bestBottom = rect.bottom
                         best = clickable
                     }
+                }
+            }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                visit(child)
+            }
+        }
+
+        visit(root)
+        return best
+    }
+
+    /**
+     * FIX (15.9.2026, lost-sticker bug part 4): same shape as
+     * findBottommostMatchingDescription above, but matches by resource
+     * id instead of content-description - for the sticker bubble, whose
+     * description is empty on-device (only sticker_1/sticker_2's id
+     * identifies it). Feeds the same long-press experiment.
+     */
+    private fun findBottommostMatchingViewId(root: AccessibilityNodeInfo, idRegex: Regex): AccessibilityNodeInfo? {
+        var best: AccessibilityNodeInfo? = null
+        var bestBottom = -1
+        val rect = Rect()
+
+        fun visit(node: AccessibilityNodeInfo) {
+            val id = node.viewIdResourceName ?: ""
+            if (idRegex.containsMatchIn(id)) {
+                var clickable: AccessibilityNodeInfo? = node
+                while (clickable != null && !clickable.isClickable) clickable = clickable.parent
+                val target = clickable ?: node
+                target.getBoundsInScreen(rect)
+                if (rect.bottom > bestBottom) {
+                    bestBottom = rect.bottom
+                    best = target
                 }
             }
             for (i in 0 until node.childCount) {
