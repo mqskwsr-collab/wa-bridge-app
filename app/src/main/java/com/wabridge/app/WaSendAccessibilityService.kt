@@ -212,12 +212,39 @@ class WaSendAccessibilityService : AccessibilityService() {
         // ACTION_CLICK needs to be a real double-tap gesture - a normal
         // click is the programmatic equivalent of that TalkBack
         // "double-tap to activate" convention.
-        private val MEDIA_BUBBLE_DESC_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image|צפייה בסרטון|viewing video|קיבלת מדבקה|received a sticker)""", RegexOption.IGNORE_CASE)
-        // Backup match by resource-id prefix, in case the description
-        // text varies by WhatsApp version/locale in ways the regex
-        // above misses - both sticker_1/sticker_2 ids seen on-device
-        // follow this pattern.
-        private val STICKER_BUBBLE_ID_REGEX = Regex("""sticker_\d+$""")
+        // FIX (15.9.2026, lost-sticker bug part 3): the part-2 fix DID
+        // find+tap the sticker (via the sticker_1/2 id match, climbing
+        // to its clickable ancestor) - but the screen that opened is
+        // WhatsApp's sticker DETAIL bottom sheet (Add to favorites / Add
+        // to sticker pack / Edit / View sticker pack), confirmed via a
+        // real on-device dump. None of those four actions save or share
+        // the raw file, and the 14s MediaStore poll afterward found
+        // nothing (as expected - that sheet never produces a file on
+        // disk). Removed that match below, since it only leads to that
+        // dead end.
+        //
+        // The SAME on-device dump (candidate list, taken BEFORE the
+        // sticker was even opened) also showed a distinct, already-
+        // visible quick-action icon directly on the chat bubble itself:
+        // id=action_button, desc='העברת המדבקה' ("forward the sticker")
+        // - this is the small forward arrow visible in the ORIGINAL
+        // screenshot the user sent at the very start of this bug
+        // report. Trying that instead: it's a real Button-class node
+        // (no ancestor-climbing needed, so no risk of grabbing the
+        // wrong wrapping container), and it sits lower on screen than
+        // the sticker_1/2 nodes so it's picked automatically by the
+        // existing bottommost-match logic once matched.
+        //
+        // NOT YET CONFIRMED this actually produces a savable/shareable
+        // file - "forward" in WhatsApp normally opens an in-app
+        // contact-picker (resend within WhatsApp), not necessarily the
+        // Android system share sheet the voice-note flow relies on.
+        // This is a one-time diagnostic step, same as the original
+        // voice-note experiment: the generic post-tap tree dump that
+        // already runs for every media type will show exactly what
+        // opens, so the next real EventLog will confirm or rule this
+        // out rather than guessing further blind.
+        private val MEDIA_BUBBLE_DESC_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image|צפייה בסרטון|viewing video|העברת המדבקה|forward(ing)? the sticker)""", RegexOption.IGNORE_CASE)
         // FIX (2.9.2026, tapped-cancel-button bug): real on-device log
         // (2.9 10:32) for a 26MB/2:17 video showed the "bubble" picked by
         // findBottommostImageViewClassed had id=com.whatsapp:id/
@@ -2130,8 +2157,7 @@ class WaSendAccessibilityService : AccessibilityService() {
 
         fun visit(node: AccessibilityNodeInfo) {
             val desc = node.contentDescription?.toString() ?: ""
-            val id = node.viewIdResourceName ?: ""
-            if (MEDIA_BUBBLE_DESC_REGEX.containsMatchIn(desc) || STICKER_BUBBLE_ID_REGEX.containsMatchIn(id)) {
+            if (MEDIA_BUBBLE_DESC_REGEX.containsMatchIn(desc)) {
                 var clickable: AccessibilityNodeInfo? = node
                 while (clickable != null && !clickable.isClickable) clickable = clickable.parent
                 val target = clickable ?: node
