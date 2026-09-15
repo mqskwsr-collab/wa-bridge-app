@@ -200,7 +200,24 @@ class WaSendAccessibilityService : AccessibilityService() {
         // pointed at the wrong element) with "צפייה בסרטון"/"viewing
         // video" (the real bubble container, matching the same "X מתוך
         // Y" pattern ALBUM_SIZE_ITEM_OF_TOTAL_REGEX already expects).
-        private val MEDIA_BUBBLE_DESC_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image|צפייה בסרטון|viewing video)""", RegexOption.IGNORE_CASE)
+        // FIX (15.9.2026, lost-sticker bug part 2): real on-device dump
+        // showed the received-sticker bubble is NOT ImageView-classed
+        // (it's a LinearLayout with id com.whatsapp:id/sticker_1 or
+        // sticker_2) but DOES carry a distinctive content-description
+        // starting with "קיבלת מדבקה" ("you received a sticker") - the
+        // "...כדי להציג את האפשרויות למדבקות צריך להקיש פעמיים" suffix
+        // is WhatsApp's standard TalkBack-style activation hint (how
+        // ANY accessibility-clickable element describes itself to a
+        // screen reader), not a literal instruction that our
+        // ACTION_CLICK needs to be a real double-tap gesture - a normal
+        // click is the programmatic equivalent of that TalkBack
+        // "double-tap to activate" convention.
+        private val MEDIA_BUBBLE_DESC_REGEX = Regex("""(הגדלת התמונה|enlarge (the )?image|צפייה בסרטון|viewing video|קיבלת מדבקה|received a sticker)""", RegexOption.IGNORE_CASE)
+        // Backup match by resource-id prefix, in case the description
+        // text varies by WhatsApp version/locale in ways the regex
+        // above misses - both sticker_1/sticker_2 ids seen on-device
+        // follow this pattern.
+        private val STICKER_BUBBLE_ID_REGEX = Regex("""sticker_\d+$""")
         // FIX (2.9.2026, tapped-cancel-button bug): real on-device log
         // (2.9 10:32) for a 26MB/2:17 video showed the "bubble" picked by
         // findBottommostImageViewClassed had id=com.whatsapp:id/
@@ -2113,7 +2130,8 @@ class WaSendAccessibilityService : AccessibilityService() {
 
         fun visit(node: AccessibilityNodeInfo) {
             val desc = node.contentDescription?.toString() ?: ""
-            if (MEDIA_BUBBLE_DESC_REGEX.containsMatchIn(desc)) {
+            val id = node.viewIdResourceName ?: ""
+            if (MEDIA_BUBBLE_DESC_REGEX.containsMatchIn(desc) || STICKER_BUBBLE_ID_REGEX.containsMatchIn(id)) {
                 var clickable: AccessibilityNodeInfo? = node
                 while (clickable != null && !clickable.isClickable) clickable = clickable.parent
                 val target = clickable ?: node
