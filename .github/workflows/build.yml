@@ -20,9 +20,13 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      # FIX (15.9.2026): android-actions/setup-android@v3 started failing
+      # ("Warning: Failed to find package 'tools'") - it tries to install
+      # the legacy "tools" package, which Google has removed from its SDK
+      # repository server-side (unrelated to any code change here).
+      # GitHub's ubuntu-latest runners already ship a full preinstalled
+      # Android SDK (ANDROID_HOME set, common licenses pre-accepted) -
+      # dropping this step lets Gradle/AGP use that instead.
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
