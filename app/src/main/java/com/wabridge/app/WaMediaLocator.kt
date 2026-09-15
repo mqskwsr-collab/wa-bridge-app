@@ -111,6 +111,26 @@ object WaMediaLocator {
     // gap so this can be tuned precisely instead of guessed again.
     private const val MATCH_WINDOW_MS = 30_000L
 
+    // FIX (15.9.2026, stale-sticker-file bug, take 2): the first version
+    // of this fix ignored the time window for the WHOLE STICKER type,
+    // across every subfolder in its search list - which includes
+    // SUBFOLDER_IMAGES as a shared fallback. Real on-device log: that
+    // blanket window let a genuinely unrelated, much-newer PHOTO sitting
+    // in WhatsApp Images win the "newest across all candidates" pick,
+    // since the actual (correct) sticker file is legitimately old
+    // (cached from an earlier receipt of the same sticker) - a wrong
+    // photo got attached to the sticker message instead. The "ignore
+    // time entirely" behavior is only actually safe for the two
+    // STICKER-dedicated folders, which never hold anything but sticker
+    // cache files; SUBFOLDER_IMAGES must keep requiring a real time
+    // match no matter which MediaType is searching it, since it holds
+    // genuinely time-stamped photos. Computed per subfolder, not once
+    // per type.
+    private fun effectiveMatchWindowMsFor(type: MediaClassifier.MediaType, subfolder: String, matchWindowMs: Long): Long {
+        val isStickerDedicatedFolder = subfolder == SUBFOLDER_STICKERS || subfolder == SUBFOLDER_STICKERS_ALT
+        return if (type == MediaClassifier.MediaType.STICKER && isStickerDedicatedFolder) Long.MAX_VALUE else matchWindowMs
+    }
+
     data class FoundMedia(val file: File, val mimeType: String)
 
     /**
@@ -229,23 +249,9 @@ object WaMediaLocator {
             MediaClassifier.MediaType.NONE -> return null
         }
 
-        // FIX (15.9.2026, stale-sticker-file bug): real on-device log -
-        // the correct folder WAS found and DID contain the right sticker
-        // files (STK-*.webp), but both were rejected: their lastModified
-        // was ~5.5-6 HOURS before the notification time, way outside
-        // even a generous window. Root cause: unlike a photo/video (a
-        // genuinely new file every time), a sticker is a shared pack
-        // asset - if this exact sticker was ever received before,
-        // WhatsApp reuses the same cached .webp file rather than writing
-        // a new one, so its mtime reflects the FIRST time it was ever
-        // received, not this message. A tight match window is actively
-        // wrong for this folder. Since WhatsApp Stickers only ever holds
-        // legitimately-received sticker files (no risk of grabbing an
-        // unrelated photo the way a shared Downloads folder might), just
-        // take the newest file in it outright for STICKER, ignoring the
-        // notification-time window entirely rather than guessing at a
-        // "wide enough" number.
-        val effectiveMatchWindowMs = if (type == MediaClassifier.MediaType.STICKER) Long.MAX_VALUE else matchWindowMs
+        // FIX (15.9.2026, stale-sticker-file bug) - see effectiveMatchWindowMsFor's
+        // doc comment below for the full story and why this must be
+        // computed PER SUBFOLDER, not once for the whole type.
 
         // FIX (23.8.2026): on-device log finally showed all 8 real
         // overflow-menu item labels (previous dumps only showed empty
@@ -300,7 +306,7 @@ object WaMediaLocator {
 
 
             val matchHere = filesHere
-                .filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= effectiveMatchWindowMs }
+                .filter { kotlin.math.abs(it.lastModified() - notificationTimeMs) <= effectiveMatchWindowMsFor(type, subfolder, matchWindowMs) }
                 .maxByOrNull { it.lastModified() }
             if (matchHere != null && (bestFile == null || matchHere.lastModified() > bestFile!!.lastModified())) {
                 bestFile = matchHere
@@ -320,7 +326,7 @@ object WaMediaLocator {
         val best = bestFile
 
         if (best == null) {
-            Log.w(TAG, "No recent file matched in any of: ${triedDirs.joinToString(" , ") { it.absolutePath }} within ${effectiveMatchWindowMs}ms of $notificationTimeMs")
+            Log.w(TAG, "No recent file matched in any of: ${triedDirs.joinToString(" , ") { it.absolutePath }} within ${matchWindowMs}ms of $notificationTimeMs (sticker-dedicated subfolders, if any were tried, ignore this window - see effectiveMatchWindowMsFor)")
             if (type == MediaClassifier.MediaType.VOICE_NOTE) {
                 // FIX (01.9.2026, cleanup): on-device testing confirmed voice
                 // notes now reliably land in the plain Downloads folder via
